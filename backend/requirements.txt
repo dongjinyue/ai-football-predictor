@@ -1,5 +1,6 @@
 fastapi==0.116.1
 anyio==4.10.0
+duckdb==1.5.5
 httpx==0.28.1
 pytest==8.4.2
 starlette==0.47.3

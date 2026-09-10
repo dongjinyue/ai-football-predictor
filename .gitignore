@@ -23,6 +23,8 @@ data/raw/*
 data/interim/*
 data/processed/*
 models/*
+*.duckdb
+*.duckdb.wal
 !data/raw/.gitkeep
 !data/interim/.gitkeep
 !data/processed/.gitkeep

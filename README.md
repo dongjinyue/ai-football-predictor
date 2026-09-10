@@ -38,6 +38,22 @@ python -m uvicorn app.main:app --reload
 {"status":"ok","service":"ai-football-predictor-api"}
 ```
 
+数据库会在后端启动时自动初始化。打开
+`http://127.0.0.1:8000/api/database/status`，可以查看 DuckDB 是否就绪、
+当前结构版本和数据表数量。
+
+当前数据库包含：
+
+- `competitions`：联赛和赛事；
+- `teams`：标准球队；
+- `team_aliases`：不同数据来源中的球队别名；
+- `matches`：比赛、赛果和数据可用时间；
+- `market_snapshots`：带采集时间和可用时间的 SP 或赔率快照；
+- `schema_migrations`：数据库结构版本记录。
+
+默认数据库文件位于 `data/processed/football_predictor.duckdb`。可以通过
+`.env` 中的 `DATABASE_PATH` 修改位置。数据库文件属于本地数据，不会提交到 Git。
+
 运行后端测试：
 
 ```bash
