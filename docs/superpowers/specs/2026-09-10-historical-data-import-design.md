@@ -93,7 +93,24 @@ Football-Data 提供 CSV 格式的历史数据。第一版导入以下字段：
 
 市场类型和选项代码由应用层枚举校验，避免数据库结构因新增玩法频繁变化。
 
-### 4.3 导入运行记录
+### 4.3 时间语义与防止未来信息泄漏
+
+- `kickoff_at`：比赛实际开始时间；
+- `captured_at`：来源实际采集赔率的时间；
+- `available_at`：该条数据最早可被回测或线上计算使用的时间；
+- `stage`：`pre_match`（赛前）或 `closing`（收盘）；
+- `time_precision`：时间证据精度，取 `exact`、`date_only` 或 `kickoff_bound`。
+
+CSV 下载时间只记录文件获取行为，不能作为文件内每条历史赔率的
+`captured_at` 或 `available_at`。来源提供准确采集时间时，两个时间使用该值并标记
+`exact`；只有日期时采用该日期结束时刻等保守边界并标记 `date_only`；Football-Data
+这类只给历史收盘赔率而没有采集时间的文件，统一设置
+`captured_at = available_at = kickoff_at`、`stage = closing`、
+`time_precision = kickoff_bound`。因此，开球前的回测不能读取这些记录，避免未来信息泄漏。
+从 version 1（结构版本 1）迁移且无法还原真实来源的旧快照使用
+`source = legacy_unknown`，不得用赔率提供方名称代替数据来源。
+
+### 4.4 导入运行记录
 
 新增导入运行与文件级结果记录，至少保存：
 
