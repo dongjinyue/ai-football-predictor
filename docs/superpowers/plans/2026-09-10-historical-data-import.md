@@ -19,6 +19,10 @@
 - Missing odds must not prevent a valid match from being imported.
 - One file failure must not roll back already completed files.
 - Repeated imports must not create duplicate matches, snapshots, or outcomes.
+- A CSV download timestamp is audit metadata only and must never become every historical
+  market's availability timestamp. Historical closing odds without a source timestamp use
+  `captured_at = available_at = kickoff_at`, `stage = closing`, and
+  `time_precision = kickoff_bound`.
 - Automated tests must use local fixtures or mocked HTTP and must not require network access.
 - Do not implement prediction models, feature engineering, or ticket purchasing.
 - Do not commit downloaded data or DuckDB files to Git.
@@ -29,7 +33,8 @@
 
 | File | Responsibility |
 |---|---|
-| `backend/app/schema.sql` | Schema version 2, generic market outcomes, and import audit tables |
+| `backend/app/schema.sql` | Baseline schema version 1 for new and existing databases |
+| `backend/app/migrations/*.sql` | Ordered, transactional schema upgrades, starting with version 2 |
 | `backend/app/storage.py` | Database initialization and schema readiness |
 | `backend/app/imports/models.py` | Immutable source, match, market, and report value objects |
 | `backend/app/imports/catalog.py` | Supported Football-Data leagues, seasons, and URL generation |
@@ -43,21 +48,21 @@
 | `backend/tests/test_import_*.py` | Unit, integration, and API coverage |
 | `README.md` | Data source, import behavior, and local commands |
 
-### Task 1: Schema Version 2 and Import Audit Storage
+### Task 1: Schema Version 3 and Import Audit Storage
 
 **Files:**
-- Modify: `backend/app/schema.sql`
+- Create: `backend/app/migrations/003_import_audit.sql`
 - Modify: `backend/app/storage.py`
 - Modify: `backend/tests/test_storage.py`
 - Modify: `backend/tests/test_database_api.py`
 
 **Interfaces:**
 - Consumes: `initialize_database(database_path: Path) -> None`
-- Produces: schema version `2` and tables `market_outcomes`, `import_runs`, `import_files`
+- Produces: schema version `3` and tables `market_outcomes`, `import_runs`, `import_files`
 
 - [ ] **Step 1: Write failing schema tests**
 
-Add assertions that initialization creates nine tables, reports schema version 2, and enforces unique market outcomes:
+Add assertions that initialization creates nine tables, reports schema version 3, and enforces unique market outcomes:
 
 ```python
 with duckdb.connect(str(database_path)) as connection:
@@ -65,10 +70,10 @@ with duckdb.connect(str(database_path)) as connection:
     version = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
 
 assert {"market_outcomes", "import_runs", "import_files"} <= tables
-assert version == 2
+assert version == 3
 ```
 
-Update the API expectation to `schema_version: 2` and `table_count: 9`.
+Update the API expectation to `schema_version: 3` and `table_count: 9`.
 
 - [ ] **Step 2: Run the focused tests and verify failure**
 
@@ -78,11 +83,11 @@ Run from `backend/`:
 python -m pytest tests/test_storage.py tests/test_database_api.py -v
 ```
 
-Expected: FAIL because the three version-2 tables do not exist and the reported version is still 1.
+Expected: FAIL because the three version-3 tables do not exist and the reported version is still 2.
 
-- [ ] **Step 3: Add the version-2 schema**
+- [ ] **Step 3: Add the version-3 migration**
 
-Extend `schema.sql` with:
+Create `backend/app/migrations/003_import_audit.sql` with:
 
 ```sql
 CREATE TABLE IF NOT EXISTS market_outcomes (
@@ -130,7 +135,7 @@ CREATE TABLE IF NOT EXISTS import_files (
     UNIQUE (run_id, source_url)
 );
 
-INSERT OR IGNORE INTO schema_migrations (version) VALUES (2);
+INSERT INTO schema_migrations (version) VALUES (3);
 ```
 
 Add these tables to `REQUIRED_TABLES` in `storage.py`.
@@ -147,7 +152,7 @@ Expected: all tests PASS.
 - [ ] **Step 5: Commit the schema task**
 
 ```bash
-git add backend/app/schema.sql backend/app/storage.py backend/tests/test_storage.py backend/tests/test_database_api.py
+git add backend/app/migrations/003_import_audit.sql backend/app/storage.py backend/tests/test_storage.py backend/tests/test_database_api.py
 git commit -m "feat: add import audit schema"
 ```
 
@@ -202,8 +207,12 @@ class SourceFile:
 @dataclass(frozen=True)
 class MarketRecord:
     provider: str
+    source: str
     market_type: str
     stage: str
+    captured_at: datetime
+    available_at: datetime
+    time_precision: str
     line: float | None
     outcomes: tuple[tuple[str, float, str], ...]
 
@@ -212,7 +221,6 @@ class MatchRecord:
     row_number: int
     source_match_id: str
     kickoff_at: datetime
-    available_at: datetime
     home_team: str
     away_team: str
     half_time_home_score: int | None
@@ -247,7 +255,7 @@ Expected: catalog tests PASS before commit.
 
 **Interfaces:**
 - Consumes: `SourceFile`, `MatchRecord`, `MarketRecord`, `ParsedFile`
-- Produces: `parse_football_data_csv(source_file: SourceFile, content: bytes, available_at: datetime) -> ParsedFile`
+- Produces: `parse_football_data_csv(source_file: SourceFile, content: bytes) -> ParsedFile`
 
 - [ ] **Step 1: Add a minimal real-shape fixture and failing parser tests**
 
@@ -256,7 +264,7 @@ The fixture contains two valid matches and one invalid row. Include `Date`, `Tim
 Assert that the parser:
 
 ```python
-parsed = parse_football_data_csv(source_file, fixture_bytes, available_at)
+parsed = parse_football_data_csv(source_file, fixture_bytes)
 
 assert len(parsed.matches) == 2
 assert parsed.skipped_rows == 1
@@ -284,7 +292,6 @@ Use `csv.DictReader` and small pure helpers:
 def parse_football_data_csv(
     source_file: SourceFile,
     content: bytes,
-    available_at: datetime,
 ) -> ParsedFile:
     text = content.decode("utf-8-sig")
     rows = csv.DictReader(io.StringIO(text))
@@ -292,7 +299,7 @@ def parse_football_data_csv(
     # collect safe row errors, and return immutable records.
 ```
 
-Treat team names and full-time scores as required. Treat time, half-time scores, and all odds as optional. Use noon UTC when a historical row lacks kickoff time and retain `available_at` supplied by the downloader.
+Treat team names and full-time scores as required. Treat time, half-time scores, and all odds as optional. Use noon UTC when a historical row lacks kickoff time. For Football-Data historical odds, set `captured_at = available_at = kickoff_at`, `stage = "closing"`, and `time_precision = "kickoff_bound"`; never pass the downloader's `downloaded_at` into market availability fields.
 
 Map average odds preferentially; if average columns are absent, use a supported bookmaker triplet only when the complete triplet exists. Never combine outcomes from different providers into one snapshot.
 
@@ -440,7 +447,7 @@ for request in requests:
     file_id = repository.start_file(run_id, request)
     try:
         downloaded = downloader.download(request)
-        parsed = parse_football_data_csv(request, downloaded.content, downloaded.downloaded_at)
+        parsed = parse_football_data_csv(request, downloaded.content)
         repository.import_parsed_file(file_id, request, downloaded, parsed)
     except ImportPipelineError as exc:
         repository.fail_file(file_id, exc.code)

@@ -25,12 +25,12 @@ python -m venv .venv
 
 ```bash
 python -m pip install -r requirements.txt
-python -m uvicorn app.main:app --reload
+python -m app
 ```
 
 - `pip install`：安装依赖；`-r requirements.txt` 表示从依赖清单读取包名。
-- `uvicorn app.main:app`：从 `app/main.py` 导入名为 `app` 的 FastAPI 应用。
-- `--reload`：开发时检测代码变化并自动重启服务。
+- `python -m app`：启动 FastAPI 应用，并从仓库根目录 `.env` 读取
+  `API_HOST`、`API_PORT` 和 `DATABASE_PATH`；开发时会自动重载代码。
 
 打开 `http://127.0.0.1:8000/api/health`，应看到：
 
@@ -47,8 +47,8 @@ python -m uvicorn app.main:app --reload
 - `competitions`：联赛和赛事；
 - `teams`：标准球队；
 - `team_aliases`：不同数据来源中的球队别名；
-- `matches`：比赛、赛果和数据可用时间；
-- `market_snapshots`：带采集时间和可用时间的 SP 或赔率快照；
+- `matches`：比赛、全场与半场赛果，以及数据可用时间；
+- `market_snapshots`：带来源、赛前/收盘阶段、采集时间、可用时间和时间精度的 SP 或赔率快照；
 - `schema_migrations`：数据库结构版本记录。
 
 默认数据库文件位于 `data/processed/football_predictor.duckdb`。可以通过
@@ -89,6 +89,15 @@ npm run build
 ## 环境变量
 
 复制根目录 `.env.example` 为 `.env` 后填写本机配置。`.env` 已被 Git 忽略，不要把 API Key（接口密钥）或其他秘密提交到仓库。
+
+- `DATABASE_PATH`：后端 DuckDB 数据库路径，相对路径以仓库根目录为基准；
+- `API_HOST`：`python -m app` 监听的主机地址；
+- `API_PORT`：`python -m app` 监听的端口；
+- `VITE_API_BASE_URL`：前端访问后端 API（接口）的基础地址。Vite 已配置为读取根目录 `.env`。
+
+历史赔率的下载时间不等于赔率可用时间。没有准确采集时间的收盘赔率会按
+`captured_at = available_at = kickoff_at` 保存，并标记为 `closing` 和
+`kickoff_bound`；开球前回测不得读取这类记录，以避免未来信息泄漏。
 
 ## 当前边界
 

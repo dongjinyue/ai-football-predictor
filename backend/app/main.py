@@ -1,24 +1,18 @@
-import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
 
+from app.config import load_settings
 from app.storage import get_database_status, initialize_database
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_DATABASE_PATH = PROJECT_ROOT / "data" / "processed" / "football_predictor.duckdb"
 
 
 def resolve_database_path(database_path: Path | None = None) -> Path:
     if database_path is not None:
         return database_path
 
-    configured_path = Path(os.getenv("DATABASE_PATH", DEFAULT_DATABASE_PATH))
-    if configured_path.is_absolute():
-        return configured_path
-    return PROJECT_ROOT / configured_path
+    return load_settings().database_path
 
 
 def create_app(database_path: Path | None = None) -> FastAPI:
