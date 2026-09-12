@@ -1,0 +1,399 @@
+"""历史导入的 DuckDB 仓储：一份源文件一个事务，重复导入不覆盖事实。"""
+
+from __future__ import annotations
+
+import re
+import unicodedata
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+
+import duckdb
+
+from app.imports.models import FileImportResult, ImportRunResult, ParsedFile, SourceFile
+from app.storage import initialize_database
+
+
+# 固定命名空间让同一来源自然键在不同进程、不同机器上得到完全相同的身份。
+APPLICATION_NAMESPACE = uuid.UUID("baf3f034-97ca-5c75-8c35-6e3c678d9b3a")
+_WHITESPACE = re.compile(r"\s+")
+
+
+class RepositoryError(RuntimeError):
+    """仓储向上层暴露的安全错误代码，绝不拼接 SQL 或本机路径。"""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
+
+
+def stable_id(kind: str, *parts: str) -> str:
+    """以来源拥有的自然键生成稳定 UUIDv5，而非随机 UUID。"""
+    return str(uuid.uuid5(APPLICATION_NAMESPACE, ":".join((kind, *parts))))
+
+
+def normalize_alias(value: str) -> str:
+    """只消除 Unicode 与书写格式差异，绝不猜测两支不同球队是否相同。"""
+    return _WHITESPACE.sub(" ", unicodedata.normalize("NFKC", value).strip()).casefold()
+
+
+class ImportRepository:
+    """保存导入审计与业务事实的最小仓储接口。"""
+
+    def __init__(self, database_path: Path) -> None:
+        self.database_path = database_path
+        initialize_database(database_path)
+
+    def start_run(self, source: str, requested_files: int) -> str:
+        """创建运行审计；运行 ID 故意随机，使每次操作都有独立可追溯记录。"""
+        if not source or requested_files < 0:
+            raise RepositoryError("invalid_run")
+        run_id = str(uuid.uuid4())
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO import_runs (id, source, status, requested_files, started_at)
+                VALUES (?, ?, 'running', ?, ?)
+                """,
+                [run_id, source, requested_files, _utc_now()],
+            )
+        return run_id
+
+    def start_file(
+        self,
+        run_id: str,
+        source_file: SourceFile,
+        *,
+        local_path: str | None = None,
+        sha256: str | None = None,
+    ) -> str:
+        """登记待处理文件；下载元数据只作审计，不能改变赔率可用时间。"""
+        file_id = str(uuid.uuid4())
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO import_files (
+                        id, run_id, source, competition_code, season, source_url,
+                        local_path, sha256, status
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+                    """,
+                    [
+                        file_id,
+                        run_id,
+                        source_file.source,
+                        source_file.competition_code,
+                        source_file.season,
+                        source_file.url,
+                        local_path,
+                        sha256,
+                    ],
+                )
+        except duckdb.Error as error:
+            raise RepositoryError("audit_write_failed") from error
+        return file_id
+
+    def import_parsed_file(
+        self,
+        file_id: str,
+        source_file: SourceFile,
+        parsed_file: ParsedFile,
+    ) -> FileImportResult:
+        """原子写入一个文件的业务数据，成功后才在事务外更新审计状态。"""
+        imported_matches = 0
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN TRANSACTION")
+                try:
+                    self._assert_pending_file(connection, file_id, source_file)
+                    competition_id = self._write_competition(connection, source_file)
+                    for match in parsed_file.matches:
+                        imported_matches += self._write_match(
+                            connection, competition_id, source_file, match
+                        )
+                except Exception:
+                    connection.execute("ROLLBACK")
+                    raise
+                else:
+                    connection.execute("COMMIT")
+        except RepositoryError:
+            raise
+        except duckdb.Error as error:
+            raise RepositoryError("database_error") from error
+        except (TypeError, ValueError) as error:
+            raise RepositoryError("invalid_record") from error
+
+        # 审计不属于上方业务事务；因此文件失败时 fail_file 仍可留下原因。
+        try:
+            with self._connect() as connection:
+                updated = connection.execute(
+                    """
+                    UPDATE import_files
+                    SET status = 'completed', imported_matches = ?, skipped_rows = ?, error_code = NULL
+                    WHERE id = ? AND status = 'pending'
+                    RETURNING id
+                    """,
+                    [imported_matches, parsed_file.skipped_rows, file_id],
+                ).fetchone()
+                if updated is None:
+                    raise RepositoryError("invalid_file_state")
+        except RepositoryError:
+            raise
+        except duckdb.Error as error:
+            raise RepositoryError("audit_write_failed") from error
+
+        return FileImportResult(
+            file_id=file_id,
+            source_file=source_file,
+            status="completed",
+            imported_matches=imported_matches,
+            skipped_rows=parsed_file.skipped_rows,
+            errors=parsed_file.errors,
+        )
+
+    def fail_file(self, file_id: str, error_code: str) -> FileImportResult:
+        """在业务事务回滚后保留安全错误码，不保存异常原文。"""
+        if not error_code or not re.fullmatch(r"[a-z0-9_]+", error_code):
+            raise RepositoryError("invalid_error_code")
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    """
+                    UPDATE import_files SET status = 'failed', error_code = ?
+                    WHERE id = ? AND status = 'pending'
+                    RETURNING source, competition_code, season, source_url
+                    """,
+                    [error_code, file_id],
+                ).fetchone()
+        except duckdb.Error as error:
+            raise RepositoryError("audit_write_failed") from error
+        if row is None:
+            raise RepositoryError("invalid_file_state")
+        source, competition_code, season, source_url = row
+        return FileImportResult(
+            file_id=file_id,
+            source_file=SourceFile(source, competition_code, competition_code, "", season, source_url),
+            status="failed",
+            imported_matches=0,
+            skipped_rows=0,
+            errors=(error_code,),
+        )
+
+    def finish_run(self, run_id: str) -> ImportRunResult:
+        """依据文件审计汇总运行状态，避免协调器自行计算而产生口径漂移。"""
+        with self._connect() as connection:
+            run = connection.execute(
+                "SELECT source, requested_files FROM import_runs WHERE id = ?", [run_id]
+            ).fetchone()
+            if run is None:
+                raise RepositoryError("unknown_run")
+            completed, failed, imported, skipped = connection.execute(
+                """
+                SELECT
+                    COUNT(*) FILTER (WHERE status = 'completed'),
+                    COUNT(*) FILTER (WHERE status = 'failed'),
+                    COALESCE(SUM(imported_matches) FILTER (WHERE status = 'completed'), 0),
+                    COALESCE(SUM(skipped_rows) FILTER (WHERE status = 'completed'), 0)
+                FROM import_files WHERE run_id = ?
+                """,
+                [run_id],
+            ).fetchone()
+            errors = tuple(
+                row[0]
+                for row in connection.execute(
+                    "SELECT error_code FROM import_files WHERE run_id = ? AND status = 'failed' ORDER BY id",
+                    [run_id],
+                ).fetchall()
+            )
+            status = "completed" if failed == 0 else "completed_with_errors" if completed else "failed"
+            connection.execute(
+                """
+                UPDATE import_runs
+                SET status = ?, completed_files = ?, failed_files = ?, imported_matches = ?,
+                    skipped_rows = ?, finished_at = ?, error_summary = ?
+                WHERE id = ?
+                """,
+                [status, completed, failed, imported, skipped, _utc_now(), ",".join(errors) or None, run_id],
+            )
+        return ImportRunResult(run_id, status, run[1], completed, failed, imported, skipped, errors)
+
+    def latest_run(self) -> ImportRunResult | None:
+        """返回最近一次运行的安全摘要，不暴露内部异常文本。"""
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id, status, requested_files, completed_files, failed_files,
+                       imported_matches, skipped_rows, error_summary
+                FROM import_runs ORDER BY started_at DESC, id DESC LIMIT 1
+                """
+            ).fetchone()
+        if row is None:
+            return None
+        errors = tuple(filter(None, (row[7] or "").split(",")))
+        return ImportRunResult(*row[:7], errors)
+
+    def data_summary(self) -> dict[str, object]:
+        """返回 API 可直接消费的数据规模与最新安全时间点。"""
+        with self._connect() as connection:
+            counts = {
+                table: connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                for table in ("competitions", "teams", "matches", "market_snapshots", "market_outcomes")
+            }
+            latest_kickoff = connection.execute(
+                "SELECT CAST(MAX(kickoff_at) AS VARCHAR) FROM matches"
+            ).fetchone()[0]
+            latest_success = connection.execute(
+                "SELECT CAST(MAX(finished_at) AS VARCHAR) FROM import_runs WHERE status IN ('completed', 'completed_with_errors')"
+            ).fetchone()[0]
+        return {**counts, "latest_kickoff_at": latest_kickoff, "latest_successful_import_at": latest_success}
+
+    def _connect(self) -> duckdb.DuckDBPyConnection:
+        return duckdb.connect(str(self.database_path))
+
+    @staticmethod
+    def _assert_pending_file(connection: duckdb.DuckDBPyConnection, file_id: str, source_file: SourceFile) -> None:
+        row = connection.execute(
+            "SELECT source, competition_code, season, status FROM import_files WHERE id = ?", [file_id]
+        ).fetchone()
+        if row is None or row[3] != "pending" or row[:3] != (
+            source_file.source,
+            source_file.competition_code,
+            source_file.season,
+        ):
+            raise RepositoryError("invalid_file_state")
+
+    @staticmethod
+    def _write_competition(connection: duckdb.DuckDBPyConnection, source_file: SourceFile) -> str:
+        competition_id = stable_id("competition", source_file.source, source_file.competition_code)
+        existing = connection.execute(
+            "SELECT name_zh, country_code FROM competitions WHERE id = ?", [competition_id]
+        ).fetchone()
+        expected = (source_file.competition_name, source_file.country_code)
+        if existing is not None and existing != expected:
+            raise RepositoryError("source_fact_conflict")
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO competitions
+                (id, name_zh, name_en, country_code, source, source_competition_id)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [competition_id, source_file.competition_name, source_file.competition_name, source_file.country_code, source_file.source, source_file.competition_code],
+        )
+        return competition_id
+
+    def _write_match(self, connection: duckdb.DuckDBPyConnection, competition_id: str, source_file: SourceFile, match) -> int:
+        home_id = self._write_team(connection, source_file.source, match.home_team)
+        away_id = self._write_team(connection, source_file.source, match.away_team)
+        kickoff_at = _utc(match.kickoff_at)
+        natural_identity = ":".join((source_file.source, source_file.competition_code, source_file.season, normalize_alias(match.home_team), normalize_alias(match.away_team), kickoff_at.isoformat()))
+        match_id = stable_id("match", natural_identity)
+        existing = connection.execute(
+            """
+            SELECT competition_id, season, epoch_ms(kickoff_at), home_team_id, away_team_id,
+                   home_score, away_score, half_time_home_score, half_time_away_score,
+                   epoch_ms(available_at)
+            FROM matches WHERE id = ?
+            """,
+            [match_id],
+        ).fetchone()
+        facts = (competition_id, source_file.season, kickoff_at, home_id, away_id, match.home_score, match.away_score, match.half_time_home_score, match.half_time_away_score, kickoff_at)
+        existing_facts = (*facts[:2], _epoch_milliseconds(kickoff_at), *facts[3:9], _epoch_milliseconds(kickoff_at))
+        if existing is not None and existing != existing_facts:
+            raise RepositoryError("source_fact_conflict")
+        if existing is None:
+            connection.execute(
+                """
+                INSERT INTO matches (
+                    id, competition_id, season, kickoff_at, home_team_id, away_team_id,
+                    home_score, away_score, half_time_home_score, half_time_away_score,
+                    status, source, source_match_id, available_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'finished', ?, ?, ?)
+                """,
+                [match_id, *facts[:9], source_file.source, natural_identity, facts[9]],
+            )
+        for market in match.markets:
+            self._write_market(connection, match_id, market)
+        return int(existing is None)
+
+    @staticmethod
+    def _write_team(connection: duckdb.DuckDBPyConnection, source: str, alias: str) -> str:
+        normalized = normalize_alias(alias)
+        if not normalized:
+            raise RepositoryError("invalid_record")
+        team_id = stable_id("team", source, normalized)
+        connection.execute(
+            "INSERT OR IGNORE INTO teams (id, name_zh) VALUES (?, ?)", [team_id, alias.strip()]
+        )
+        alias_id = stable_id("team_alias", source, normalized)
+        existing = connection.execute("SELECT team_id FROM team_aliases WHERE id = ?", [alias_id]).fetchone()
+        if existing is not None and existing[0] != team_id:
+            raise RepositoryError("source_fact_conflict")
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO team_aliases (id, team_id, source, alias, normalized_alias)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            [alias_id, team_id, source, alias.strip(), normalized],
+        )
+        return team_id
+
+    @staticmethod
+    def _write_market(connection: duckdb.DuckDBPyConnection, match_id: str, market) -> None:
+        captured_at = _utc(market.captured_at)
+        available_at = _utc(market.available_at)
+        if captured_at > available_at:
+            raise RepositoryError("invalid_record")
+        handicap_key = "none" if market.line is None else f"{market.line:.2f}"
+        snapshot_id = stable_id("market_snapshot", match_id, market.source, market.provider, market.market_type, handicap_key, captured_at.isoformat(), market.stage)
+        expected = (match_id, market.provider, market.source, market.market_type, handicap_key, captured_at, available_at, market.stage, market.time_precision)
+        existing = connection.execute(
+            """
+            SELECT match_id, provider, source, market_type, handicap_key, epoch_ms(captured_at),
+                   epoch_ms(available_at), stage, time_precision
+            FROM market_snapshots WHERE id = ?
+            """,
+            [snapshot_id],
+        ).fetchone()
+        expected_existing = (*expected[:5], _epoch_milliseconds(captured_at), _epoch_milliseconds(available_at), *expected[7:])
+        if existing is not None and existing != expected_existing:
+            raise RepositoryError("source_fact_conflict")
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO market_snapshots
+                (id, match_id, provider, source, market_type, handicap, handicap_key,
+                 captured_at, available_at, stage, time_precision)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [snapshot_id, match_id, market.provider, market.source, market.market_type, market.line, handicap_key, captured_at, available_at, market.stage, market.time_precision],
+        )
+        for outcome_code, odds_value, source_field in market.outcomes:
+            outcome_id = stable_id("market_outcome", snapshot_id, outcome_code)
+            current = connection.execute(
+                "SELECT odds_value, source_field FROM market_outcomes WHERE id = ?", [outcome_id]
+            ).fetchone()
+            expected_outcome = (odds_value, source_field)
+            if current is not None and current != expected_outcome:
+                raise RepositoryError("source_fact_conflict")
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO market_outcomes
+                    (id, snapshot_id, outcome_code, odds_value, source_field)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                [outcome_id, snapshot_id, outcome_code, odds_value, source_field],
+            )
+
+
+def _utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        raise ValueError("naive_datetime")
+    return value.astimezone(timezone.utc)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _epoch_milliseconds(value: datetime) -> int:
+    """统一 TIMESTAMPTZ 比较口径，避免最小离线环境的时区可选依赖。"""
+    return int(value.timestamp() * 1000)
