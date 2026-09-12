@@ -195,7 +195,9 @@ def test_finish_run_rejects_incomplete_requested_scope_and_keeps_audit_running(
     with pytest.raises(RepositoryError, match="incomplete_run"):
         repository.finish_run(run_id)
 
-    assert repository.latest_run().status == "running"
+    latest = repository.latest_run()
+    assert latest is not None
+    assert latest.result.status == "running"
 
 
 def test_start_file_rejects_run_that_has_already_finished(

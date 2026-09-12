@@ -1,8 +1,11 @@
+from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import Mock
 
+import pytest
 from fastapi.testclient import TestClient
 
-from app.imports.models import ImportRunResult
+from app.imports.models import ImportRequestScope, ImportRunAudit, ImportRunResult
 from app.main import create_app
 
 
@@ -24,10 +27,10 @@ class FakeImportService:
 class FakeRepository:
     """为 API 提供稳定的只读摘要，避免测试接触真实 DuckDB。"""
 
-    def __init__(self, latest: ImportRunResult | None = None) -> None:
+    def __init__(self, latest: ImportRunAudit | None = None) -> None:
         self._latest = latest
 
-    def latest_run(self) -> ImportRunResult | None:
+    def latest_run(self) -> ImportRunAudit | None:
         return self._latest
 
     def data_summary(self) -> dict[str, object]:
@@ -110,6 +113,21 @@ def test_import_endpoint_rejects_a_season_not_supported_by_competition_style() -
     assert service.requests == ()
 
 
+@pytest.mark.parametrize("season", ["9900", "0001", "2627"])
+def test_import_endpoint_rejects_split_year_seasons_outside_the_current_catalog(season: str) -> None:
+    """不能仅根据 YYZZ 格式推断目录可用性，防止世纪歧义与未来范围。"""
+    service = FakeImportService()
+
+    response = build_client(service).post(
+        "/api/data/import",
+        json={"competition_codes": ["E0"], "seasons": [season]},
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": "unknown_season"}
+    assert service.requests == ()
+
+
 def test_import_endpoint_hides_unexpected_exception_details() -> None:
     response = build_client(FakeImportService(error=RuntimeError(r"C:\secret\raw.csv: boom"))).post(
         "/api/data/import",
@@ -127,9 +145,94 @@ def test_latest_endpoint_returns_stable_null_when_no_run_exists() -> None:
     assert response.json() == {"latest_run": None}
 
 
+def test_latest_endpoint_returns_audited_source_times_and_requested_scope() -> None:
+    latest = ImportRunAudit(
+        result=ImportRunResult("run-123", "completed", 1, 1, 0, 2, 0, ()),
+        source="football_data",
+        started_at=datetime(2026, 9, 12, 10, 0, tzinfo=timezone.utc),
+        finished_at=datetime(2026, 9, 12, 10, 1, tzinfo=timezone.utc),
+        requested_scope=(ImportRequestScope(competition_code="E0", season="2324"),),
+    )
+
+    response = build_client(repository=FakeRepository(latest)).get("/api/data/imports/latest")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "latest_run": {
+            "run_id": "run-123",
+            "status": "completed",
+            "source": "football_data",
+            "started_at": "2026-09-12T10:00:00Z",
+            "finished_at": "2026-09-12T10:01:00Z",
+            "requested_files": 1,
+            "requested_scope": [{"competition_code": "E0", "season": "2324"}],
+            "completed_files": 1,
+            "failed_files": 0,
+            "imported_matches": 2,
+            "skipped_rows": 0,
+            "errors": [],
+        }
+    }
+
+
 def test_summary_endpoint_returns_repository_counts_and_timestamps() -> None:
     response = build_client().get("/api/data/summary")
 
     assert response.status_code == 200
     assert response.json()["matches"] == 2
     assert response.json()["market_outcomes"] == 8
+
+
+def test_create_app_defers_real_import_dependencies_until_lifespan(monkeypatch: pytest.MonkeyPatch) -> None:
+    """仅构造应用不能创建默认数据库或 HTTP 客户端，便于导入模块与离线测试。"""
+    import app.main as main
+
+    repository_factory = Mock()
+    client_factory = Mock()
+    monkeypatch.setattr(main, "ImportRepository", repository_factory)
+    monkeypatch.setattr(main.httpx, "Client", client_factory)
+
+    main.create_app()
+
+    repository_factory.assert_not_called()
+    client_factory.assert_not_called()
+
+
+def test_injected_fake_app_lifespan_has_no_default_database_or_client_side_effects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """完整进入 fake 应用生命周期也不能初始化默认依赖。"""
+    import app.main as main
+
+    initialize = Mock()
+    client_factory = Mock()
+    monkeypatch.setattr(main, "initialize_database", initialize)
+    monkeypatch.setattr(main.httpx, "Client", client_factory)
+
+    application = main.create_app(
+        Path("unused.duckdb"),
+        import_service=FakeImportService(),
+        import_repository=FakeRepository(),
+    )
+    with TestClient(application):
+        pass
+
+    initialize.assert_not_called()
+    client_factory.assert_not_called()
+
+
+def test_lifespan_closes_client_when_initialization_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """启动失败也必须释放已创建的连接池。"""
+    import app.main as main
+
+    client = Mock()
+    monkeypatch.setattr(main.httpx, "Client", Mock(return_value=client))
+    monkeypatch.setattr(main, "initialize_database", Mock(side_effect=RuntimeError("database unavailable")))
+
+    application = main.create_app()
+
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        with TestClient(application):
+            pass
+
+    client.close.assert_called_once_with()

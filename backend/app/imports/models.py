@@ -80,3 +80,22 @@ class ImportRunResult:
     imported_matches: int
     skipped_rows: int
     errors: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ImportRequestScope:
+    """最近一次导入中一个经审计的联赛赛季请求范围。"""
+
+    competition_code: str
+    season: str
+
+
+@dataclass(frozen=True)
+class ImportRunAudit:
+    """最近一次导入的不可变审计视图，供 API 安全展示。"""
+
+    result: ImportRunResult
+    source: str
+    started_at: datetime
+    finished_at: datetime | None
+    requested_scope: tuple[ImportRequestScope, ...]

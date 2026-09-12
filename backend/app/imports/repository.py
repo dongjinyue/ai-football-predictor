@@ -10,7 +10,14 @@ from pathlib import Path
 
 import duckdb
 
-from app.imports.models import FileImportResult, ImportRunResult, ParsedFile, SourceFile
+from app.imports.models import (
+    FileImportResult,
+    ImportRequestScope,
+    ImportRunAudit,
+    ImportRunResult,
+    ParsedFile,
+    SourceFile,
+)
 from app.storage import initialize_database
 
 
@@ -275,20 +282,36 @@ class ImportRepository:
             )
         return ImportRunResult(run_id, status, run[1], completed, failed, imported, skipped, errors)
 
-    def latest_run(self) -> ImportRunResult | None:
-        """返回最近一次运行的安全摘要，不暴露内部异常文本。"""
+    def latest_run(self) -> ImportRunAudit | None:
+        """从运行和文件审计聚合最近一次导入，保留公开所需的真实来源与范围。"""
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT id, status, requested_files, completed_files, failed_files,
-                       imported_matches, skipped_rows, error_summary
+                SELECT id, source, status, requested_files, completed_files, failed_files,
+                       imported_matches, skipped_rows,
+                       CAST(started_at AS VARCHAR), CAST(finished_at AS VARCHAR), error_summary
                 FROM import_runs ORDER BY started_at DESC, id DESC LIMIT 1
                 """
             ).fetchone()
+            scope_rows = () if row is None else connection.execute(
+                """
+                SELECT competition_code, season
+                FROM import_files WHERE run_id = ?
+                ORDER BY competition_code, season, source_url
+                """,
+                [row[0]],
+            ).fetchall()
         if row is None:
             return None
-        errors = tuple(filter(None, (row[7] or "").split(",")))
-        return ImportRunResult(*row[:7], errors)
+        errors = tuple(filter(None, (row[10] or "").split(",")))
+        result = ImportRunResult(row[0], row[2], *row[3:8], errors)
+        return ImportRunAudit(
+            result=result,
+            source=row[1],
+            started_at=_parse_database_timestamp(row[8]),
+            finished_at=_parse_database_timestamp(row[9]) if row[9] else None,
+            requested_scope=tuple(ImportRequestScope(*scope_row) for scope_row in scope_rows),
+        )
 
     def data_summary(self) -> dict[str, object]:
         """返回 API 可直接消费的数据规模与最新安全时间点。"""
@@ -472,6 +495,12 @@ def _utc(value: datetime) -> datetime:
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _parse_database_timestamp(value: str) -> datetime:
+    """避免 DuckDB 将 TIMESTAMPTZ 转为 Python 对象时依赖可选 pytz（时区库）。"""
+    parsed = datetime.fromisoformat(value.replace("Z", "+00"))
+    return _utc(parsed)
 
 
 def _epoch_milliseconds(value: datetime) -> int:

@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import logging
-from datetime import date
-from typing import Protocol
+from datetime import date, datetime
+from typing import Literal, Protocol
 
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.imports.catalog import (
     CALENDAR_YEAR,
@@ -16,7 +16,7 @@ from app.imports.catalog import (
     SPLIT_YEAR,
     build_default_requests,
 )
-from app.imports.models import ImportRunResult, SourceFile
+from app.imports.models import ImportRequestScope, ImportRunAudit, ImportRunResult, SourceFile
 
 
 logger = logging.getLogger(__name__)
@@ -28,7 +28,7 @@ class _ImportService(Protocol):
 
 
 class _ImportRepository(Protocol):
-    def latest_run(self) -> ImportRunResult | None: ...
+    def latest_run(self) -> ImportRunAudit | None: ...
 
     def data_summary(self) -> dict[str, object]: ...
 
@@ -42,7 +42,7 @@ class ImportRequest(BaseModel):
 
 class ImportRunResponse(BaseModel):
     run_id: str
-    status: str
+    status: Literal["running", "completed", "completed_with_errors", "failed"]
     requested_files: int
     completed_files: int
     failed_files: int
@@ -51,8 +51,24 @@ class ImportRunResponse(BaseModel):
     errors: list[str]
 
 
+class RequestedScopeResponse(BaseModel):
+    """不可变的公开请求范围，不泄露下载 URL（地址）或本机路径。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    competition_code: str
+    season: str
+
+
+class LatestImportRunResponse(ImportRunResponse):
+    source: str
+    started_at: datetime
+    finished_at: datetime | None
+    requested_scope: tuple[RequestedScopeResponse, ...]
+
+
 class LatestRunResponse(BaseModel):
-    latest_run: ImportRunResponse | None
+    latest_run: LatestImportRunResponse | None
 
 
 class DataSummaryResponse(BaseModel):
@@ -65,14 +81,15 @@ class DataSummaryResponse(BaseModel):
     latest_successful_import_at: str | None
 
 
-def create_import_router(service: _ImportService, repository: _ImportRepository) -> APIRouter:
+def create_import_router() -> APIRouter:
     """创建无全局状态的路由，依赖由应用工厂或测试显式提供。"""
     router = APIRouter()
 
     @router.post("/import", response_model=ImportRunResponse)
-    def import_data(payload: ImportRequest) -> ImportRunResponse:
+    def import_data(payload: ImportRequest, request: Request) -> ImportRunResponse:
         requests = _requests_for_payload(payload)
         try:
+            service: _ImportService = request.app.state.import_service
             result = service.run(requests)
         except HTTPException:
             raise
@@ -83,17 +100,19 @@ def create_import_router(service: _ImportService, repository: _ImportRepository)
         return _run_response(result)
 
     @router.get("/imports/latest", response_model=LatestRunResponse)
-    def latest_import() -> LatestRunResponse:
+    def latest_import(request: Request) -> LatestRunResponse:
         try:
+            repository: _ImportRepository = request.app.state.import_repository
             result = repository.latest_run()
         except Exception:
             logger.exception("读取最近历史导入记录失败")
             raise HTTPException(status_code=500, detail="internal_error") from None
-        return LatestRunResponse(latest_run=_run_response(result) if result else None)
+        return LatestRunResponse(latest_run=_latest_run_response(result) if result else None)
 
     @router.get("/summary", response_model=DataSummaryResponse)
-    def data_summary() -> DataSummaryResponse:
+    def data_summary(request: Request) -> DataSummaryResponse:
         try:
+            repository: _ImportRepository = request.app.state.import_repository
             return DataSummaryResponse.model_validate(repository.data_summary())
         except Exception:
             logger.exception("读取历史数据摘要失败")
@@ -115,6 +134,20 @@ def _run_response(result: ImportRunResult) -> ImportRunResponse:
     )
 
 
+def _latest_run_response(audit: ImportRunAudit) -> LatestImportRunResponse:
+    """从不可变审计对象创建明确的最新导入 API 响应。"""
+    return LatestImportRunResponse(
+        **_run_response(audit.result).model_dump(),
+        source=audit.source,
+        started_at=audit.started_at,
+        finished_at=audit.finished_at,
+        requested_scope=tuple(
+            RequestedScopeResponse(competition_code=item.competition_code, season=item.season)
+            for item in audit.requested_scope
+        ),
+    )
+
+
 def _requests_for_payload(payload: ImportRequest) -> tuple[SourceFile, ...]:
     """将已验证范围映射为目录项，绝不接受任意 URL 或未知联赛。"""
     if not payload.competition_codes and not payload.seasons:
@@ -129,17 +162,17 @@ def _requests_for_payload(payload: ImportRequest) -> tuple[SourceFile, ...]:
         if code not in _COMPETITION_BY_CODE:
             _invalid_scope("unknown_competition_code")
 
-    default_by_code: dict[str, tuple[str, ...]] = {}
+    default_by_code: dict[str, set[str]] = {}
     for source_file in build_default_requests(date.today()):
-        default_by_code.setdefault(source_file.competition_code, ())
-        default_by_code[source_file.competition_code] += (source_file.season,)
+        default_by_code.setdefault(source_file.competition_code, set()).add(source_file.season)
 
     requests: list[SourceFile] = []
     for code in codes:
-        _, name, country_code, season_style = _COMPETITION_BY_CODE[code]
+        _, name, country_code, _season_style = _COMPETITION_BY_CODE[code]
         seasons = tuple(payload.seasons) or default_by_code[code]
         for season in seasons:
-            if not _is_supported_season(season, season_style):
+            # 必须与目录实际生成的“已完成且受支持”赛季精确一致，不能只校验 YYZZ 外观。
+            if season not in default_by_code[code]:
                 _invalid_scope("unknown_season")
             requests.append(
                 SourceFile(
@@ -152,19 +185,6 @@ def _requests_for_payload(payload: ImportRequest) -> tuple[SourceFile, ...]:
                 )
             )
     return tuple(requests)
-
-
-def _is_supported_season(season: str, season_style: str) -> bool:
-    """按目录定义的赛季格式校验，并拒绝未来或明显无效的年份。"""
-    today = date.today()
-    if season_style == SPLIT_YEAR:
-        if len(season) != 4 or not season.isdigit():
-            return False
-        start_year, end_year = int(season[:2]), int(season[2:])
-        return 0 <= start_year <= 99 and end_year == (start_year + 1) % 100 and 2000 <= 2000 + end_year <= today.year
-    if season_style == CALENDAR_YEAR:
-        return season.isdigit() and len(season) == 4 and 2000 <= int(season) < today.year
-    return False
 
 
 def _invalid_scope(code: str) -> None:
