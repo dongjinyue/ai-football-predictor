@@ -139,3 +139,52 @@ def test_parser_does_not_fall_back_when_average_columns_exist_but_are_incomplete
     parsed = parse_football_data_csv(source_file, content)
 
     assert parsed.matches[0].markets == ()
+
+
+@pytest.mark.parametrize(
+    ("headers", "values"),
+    [
+        ("AvgH,AvgD,AvgA", "0,,4.0"),
+        ("Avg>2.5,Avg<2.5", "0,"),
+        ("AHh,AvgAHH,AvgAHA", ",0,"),
+    ],
+)
+def test_parser_rejects_non_positive_odds_in_incomplete_market_groups(
+    source_file: SourceFile, headers: str, values: str
+) -> None:
+    """防止不完整赔率组把 0 或负数静默当作“市场缺失”。"""
+    content = (
+        f"Date,HomeTeam,AwayTeam,FTHG,FTAG,{headers}\n"
+        f"01/05/24,Home,Away,1,0,{values}\n"
+    ).encode()
+
+    parsed = parse_football_data_csv(source_file, content)
+
+    assert parsed.matches == ()
+    assert parsed.skipped_rows == 1
+    assert parsed.errors == ("row_2:invalid_odds",)
+
+
+@pytest.mark.parametrize(
+    ("headers", "values", "error_code"),
+    [
+        ("AvgH,AvgD,AvgA", "nan,3.0,4.0", "invalid_odds"),
+        ("Avg>2.5,Avg<2.5", "inf,2.0", "invalid_odds"),
+        ("AHh,AvgAHH,AvgAHA", "0.5,-inf,1.9", "invalid_odds"),
+        ("AHh,AvgAHH,AvgAHA", "nan,1.9,1.9", "invalid_handicap"),
+    ],
+)
+def test_parser_rejects_non_finite_odds_and_handicap_values(
+    source_file: SourceFile, headers: str, values: str, error_code: str
+) -> None:
+    """防止 NaN 或 Infinity 进入市场记录和后续数据库约束。"""
+    content = (
+        f"Date,HomeTeam,AwayTeam,FTHG,FTAG,{headers}\n"
+        f"01/05/24,Home,Away,1,0,{values}\n"
+    ).encode()
+
+    parsed = parse_football_data_csv(source_file, content)
+
+    assert parsed.matches == ()
+    assert parsed.skipped_rows == 1
+    assert parsed.errors == (f"row_2:{error_code}",)

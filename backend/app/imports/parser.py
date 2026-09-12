@@ -2,6 +2,7 @@
 
 import csv
 import io
+import math
 from datetime import datetime, time, timezone
 
 from app.imports.models import MarketRecord, MatchRecord, ParsedFile, SourceFile
@@ -213,6 +214,12 @@ def _two_or_three_outcome_market(
     values = [(outcome, field, (row.get(field) or "").strip()) for outcome, field in fields]
     if not any(value for _, _, value in values):
         return None
+
+    # 空值表示来源没有该结果；但只要出现了数值，就必须先验证。这样不完整
+    # 赔率组里的 0、NaN 或 Infinity 不会被误判为可忽略的“市场缺失”。
+    for _, _, value in values:
+        if value:
+            _positive_odds(value)
     if not all(value for _, _, value in values):
         return None
 
@@ -236,6 +243,14 @@ def _asian_handicap_market(
     row: dict[str, str | None], kickoff_at: datetime
 ) -> MarketRecord | None:
     line_value = (row.get("AHh") or "").strip()
+    line: float | None = None
+    if line_value:
+        try:
+            line = float(line_value)
+        except ValueError as error:
+            raise _RowError("invalid_handicap") from error
+        if not math.isfinite(line):
+            raise _RowError("invalid_handicap")
     odds = _two_or_three_outcome_market(
         row,
         kickoff_at,
@@ -248,10 +263,6 @@ def _asian_handicap_market(
         return None
     if not line_value:
         return None
-    try:
-        line = float(line_value)
-    except ValueError as error:
-        raise _RowError("invalid_handicap") from error
     return MarketRecord(
         provider=odds.provider,
         source=odds.source,
@@ -270,6 +281,6 @@ def _positive_odds(value: str) -> float:
         odds = float(value)
     except ValueError as error:
         raise _RowError("invalid_odds") from error
-    if odds <= 0:
+    if not math.isfinite(odds) or odds <= 0:
         raise _RowError("invalid_odds")
     return odds
