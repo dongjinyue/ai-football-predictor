@@ -6,6 +6,7 @@ from dotenv import dotenv_values
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DATABASE_PATH = Path("data/processed/football_predictor.duckdb")
+DEFAULT_FOOTBALL_DATA_RAW_PATH = Path("data/raw/football_data")
 
 
 @dataclass(frozen=True)
@@ -13,6 +14,7 @@ class Settings:
     """应用运行配置；路径在这里统一解析，避免各模块各自读取环境变量。"""
 
     database_path: Path
+    football_data_raw_path: Path
     api_host: str
     api_port: int
 
@@ -35,9 +37,18 @@ def load_settings(
         if configured_path.is_absolute()
         else project_root / configured_path
     )
+    configured_raw_path = Path(
+        values.get("FOOTBALL_DATA_RAW_PATH", str(DEFAULT_FOOTBALL_DATA_RAW_PATH))
+    )
+    football_data_raw_path = (
+        configured_raw_path
+        if configured_raw_path.is_absolute()
+        else project_root / configured_raw_path
+    )
 
     return Settings(
         database_path=database_path,
+        football_data_raw_path=football_data_raw_path,
         api_host=values.get("API_HOST", "127.0.0.1"),
         api_port=int(values.get("API_PORT", "8000")),
     )

@@ -16,6 +16,7 @@ def test_load_settings_reads_repository_env_file(tmp_path: Path) -> None:
     settings = load_settings(env_file=env_file, project_root=tmp_path)
 
     assert settings.database_path == tmp_path / "custom" / "data.duckdb"
+    assert settings.football_data_raw_path == tmp_path / "data" / "raw" / "football_data"
     assert settings.api_host == "0.0.0.0"
     assert settings.api_port == 9123
 
@@ -31,6 +32,15 @@ def test_environment_variables_override_env_file(
     settings = load_settings(env_file=env_file, project_root=tmp_path)
 
     assert settings.api_port == 9234
+
+
+def test_load_settings_reads_football_data_raw_path(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("FOOTBALL_DATA_RAW_PATH=cache/football-data\n", encoding="utf-8")
+
+    settings = load_settings(env_file=env_file, project_root=tmp_path)
+
+    assert settings.football_data_raw_path == tmp_path / "cache" / "football-data"
 
 
 def test_uvicorn_options_use_loaded_host_and_port(tmp_path: Path) -> None:
