@@ -1,0 +1,4 @@
+Date,Time,HomeTeam,AwayTeam,FTHG,FTAG,HTHG,HTAG,AvgH,AvgD,AvgA,Avg>2.5,Avg<2.5,AHh,AvgAHH,AvgAHA
+11/08/2023,20:00,Burnley,Manchester City,0,3,0,2,9.50,5.00,1.35,1.72,2.15,1.5,1.91,2.02
+12/08/2023,,Arsenal,Nottingham Forest,2,1,2,0,1.30,5.80,10.50,1.60,2.35,-1.5,1.95,1.98
+13/08/2023,15:00,Invalid Row,Invalid Row,1,0,1,0,2.00,3.00,4.00,1.80,2.00,0.5,1.90,1.90
