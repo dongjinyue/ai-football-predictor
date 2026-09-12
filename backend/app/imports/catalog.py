@@ -32,7 +32,22 @@ COMPETITIONS: tuple[tuple[str, str, str, str], ...] = (
     ("P1", "Portuguese Primeira Liga", "PRT", SPLIT_YEAR),
     ("T1", "Turkish Super Lig", "TUR", SPLIT_YEAR),
     ("G1", "Greek Super League", "GRC", SPLIT_YEAR),
+    ("ARG", "Argentine Primera Division", "ARG", CALENDAR_YEAR),
+    ("AUT", "Austrian Bundesliga", "AUT", SPLIT_YEAR),
     ("BRA", "Brazilian Serie A", "BRA", CALENDAR_YEAR),
+    ("CHN", "Chinese Super League", "CHN", CALENDAR_YEAR),
+    ("DNK", "Danish Superliga", "DNK", SPLIT_YEAR),
+    ("FIN", "Finnish Veikkausliiga", "FIN", CALENDAR_YEAR),
+    ("IRL", "Irish Premier Division", "IRL", CALENDAR_YEAR),
+    ("JPN", "Japanese J-League", "JPN", CALENDAR_YEAR),
+    ("MEX", "Mexican Liga MX", "MEX", SPLIT_YEAR),
+    ("NOR", "Norwegian Eliteserien", "NOR", CALENDAR_YEAR),
+    ("POL", "Polish Ekstraklasa", "POL", SPLIT_YEAR),
+    ("ROU", "Romanian Liga 1", "ROU", SPLIT_YEAR),
+    ("RUS", "Russian Premier League", "RUS", SPLIT_YEAR),
+    ("SWE", "Swedish Allsvenskan", "SWE", CALENDAR_YEAR),
+    ("SWZ", "Swiss Super League", "CHE", SPLIT_YEAR),
+    ("USA", "Major League Soccer", "USA", CALENDAR_YEAR),
 )
 
 

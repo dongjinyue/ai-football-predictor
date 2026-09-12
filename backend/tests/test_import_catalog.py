@@ -14,6 +14,50 @@ from app.imports.models import (
 )
 
 
+# Football-Data 官方目录包含 22 个主联赛分区及 16 个 Extra Leagues（额外联赛）。
+# 此处故意不从 catalog 导入期望值，以便目录遗漏时测试能够失败。
+EXPECTED_COMPETITION_SEASON_STYLES = {
+    "E0": "split_year",
+    "E1": "split_year",
+    "E2": "split_year",
+    "E3": "split_year",
+    "EC": "split_year",
+    "SC0": "split_year",
+    "SC1": "split_year",
+    "SC2": "split_year",
+    "SC3": "split_year",
+    "D1": "split_year",
+    "D2": "split_year",
+    "I1": "split_year",
+    "I2": "split_year",
+    "SP1": "split_year",
+    "SP2": "split_year",
+    "F1": "split_year",
+    "F2": "split_year",
+    "N1": "split_year",
+    "B1": "split_year",
+    "P1": "split_year",
+    "T1": "split_year",
+    "G1": "split_year",
+    "ARG": "calendar_year",
+    "AUT": "split_year",
+    "BRA": "calendar_year",
+    "CHN": "calendar_year",
+    "DNK": "split_year",
+    "FIN": "calendar_year",
+    "IRL": "calendar_year",
+    "JPN": "calendar_year",
+    "MEX": "split_year",
+    "NOR": "calendar_year",
+    "POL": "split_year",
+    "ROU": "split_year",
+    "RUS": "split_year",
+    "SWE": "calendar_year",
+    "SWZ": "split_year",
+    "USA": "calendar_year",
+}
+
+
 def test_default_requests_cover_each_configured_league_once_per_season() -> None:
     """防止目录遗漏某联赛，或为同一来源文件生成重复请求。"""
     requests = build_default_requests(date(2026, 9, 10), seasons=5)
@@ -29,6 +73,13 @@ def test_default_requests_cover_each_configured_league_once_per_season() -> None
         item.url.startswith("https://www.football-data.co.uk/mmz4281/")
         for item in requests
     )
+
+
+def test_catalog_matches_all_official_football_data_competitions_and_season_styles() -> None:
+    """防止 Football-Data 的公开主联赛或 Extra Leagues 被悄然遗漏。"""
+    configured_styles = {code: season_style for code, _, _, season_style in COMPETITIONS}
+
+    assert configured_styles == EXPECTED_COMPETITION_SEASON_STYLES
 
 
 def test_default_requests_use_completed_seasons_for_each_season_style() -> None:
