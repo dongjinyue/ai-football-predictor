@@ -81,16 +81,19 @@ class DataSummaryResponse(BaseModel):
     latest_successful_import_at: str | None
 
 
-def create_import_router() -> APIRouter:
-    """创建无全局状态的路由，依赖由应用工厂或测试显式提供。"""
+def create_import_router(
+    service: _ImportService | None = None,
+    repository: _ImportRepository | None = None,
+) -> APIRouter:
+    """创建路由；显式依赖优先，未传入时才在请求期读取应用状态。"""
     router = APIRouter()
 
     @router.post("/import", response_model=ImportRunResponse)
     def import_data(payload: ImportRequest, request: Request) -> ImportRunResponse:
         requests = _requests_for_payload(payload)
         try:
-            service: _ImportService = request.app.state.import_service
-            result = service.run(requests)
+            resolved_service = service if service is not None else request.app.state.import_service
+            result = resolved_service.run(requests)
         except HTTPException:
             raise
         except Exception:
@@ -102,8 +105,10 @@ def create_import_router() -> APIRouter:
     @router.get("/imports/latest", response_model=LatestRunResponse)
     def latest_import(request: Request) -> LatestRunResponse:
         try:
-            repository: _ImportRepository = request.app.state.import_repository
-            result = repository.latest_run()
+            resolved_repository = (
+                repository if repository is not None else request.app.state.import_repository
+            )
+            result = resolved_repository.latest_run()
         except Exception:
             logger.exception("读取最近历史导入记录失败")
             raise HTTPException(status_code=500, detail="internal_error") from None
@@ -112,8 +117,10 @@ def create_import_router() -> APIRouter:
     @router.get("/summary", response_model=DataSummaryResponse)
     def data_summary(request: Request) -> DataSummaryResponse:
         try:
-            repository: _ImportRepository = request.app.state.import_repository
-            return DataSummaryResponse.model_validate(repository.data_summary())
+            resolved_repository = (
+                repository if repository is not None else request.app.state.import_repository
+            )
+            return DataSummaryResponse.model_validate(resolved_repository.data_summary())
         except Exception:
             logger.exception("读取历史数据摘要失败")
             raise HTTPException(status_code=500, detail="internal_error") from None

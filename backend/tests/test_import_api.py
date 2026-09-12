@@ -3,9 +3,11 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.imports.models import ImportRequestScope, ImportRunAudit, ImportRunResult
+from app.imports.router import create_import_router
 from app.main import create_app
 
 
@@ -74,6 +76,27 @@ def test_import_endpoint_runs_exact_requested_competition_and_season() -> None:
         "skipped_rows": 0,
         "errors": [],
     }
+    assert [(item.competition_code, item.season) for item in service.requests] == [("E0", "2324")]
+
+
+def test_import_router_factory_accepts_explicit_dependencies_without_app_state() -> None:
+    """公开工厂契约允许直接注入依赖，三条路由均不能回退读取 app.state。"""
+    service = FakeImportService()
+    repository = FakeRepository()
+    application = FastAPI()
+    application.include_router(create_import_router(service, repository), prefix="/api/data")
+    client = TestClient(application)
+
+    imported = client.post(
+        "/api/data/import",
+        json={"competition_codes": ["E0"], "seasons": ["2324"]},
+    )
+    latest = client.get("/api/data/imports/latest")
+    summary = client.get("/api/data/summary")
+
+    assert imported.status_code == 200
+    assert latest.json() == {"latest_run": None}
+    assert summary.json()["matches"] == 2
     assert [(item.competition_code, item.season) for item in service.requests] == [("E0", "2324")]
 
 
