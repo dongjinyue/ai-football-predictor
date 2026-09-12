@@ -74,7 +74,32 @@ class FootballDataDownloader:
         return self._write_validated_cache(path, content, content_type)
 
     def _cache_path(self, request: SourceFile) -> Path:
-        return self.raw_root / request.competition_code / request.season / "matches.csv"
+        competition_code = self._safe_path_identifier(request.competition_code)
+        season = self._safe_path_identifier(request.season)
+        raw_root = self.raw_root.resolve()
+        path = raw_root / competition_code / season / "matches.csv"
+        try:
+            # resolve 会展开已存在的符号链接；relative_to 确认最终路径没有逃出缓存根目录。
+            path.resolve().relative_to(raw_root)
+        except ValueError as error:
+            raise DownloadValidationError("invalid_cache_path") from error
+        return path
+
+    @staticmethod
+    def _safe_path_identifier(value: str) -> str:
+        """仅接受一个不含路径语义的来源标识符，不能通过清洗改变其含义。"""
+        if (
+            not value
+            or value in {".", ".."}
+            or value != value.strip()
+            or "/" in value
+            or "\\" in value
+            or ":" in value
+            or "\x00" in value
+            or Path(value).is_absolute()
+        ):
+            raise DownloadValidationError("invalid_cache_path")
+        return value
 
     def _request_content(self, request: SourceFile) -> tuple[bytes, str | None]:
         for attempt in range(1, self.max_attempts + 1):

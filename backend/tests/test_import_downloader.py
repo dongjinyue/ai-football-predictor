@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 
@@ -208,3 +209,37 @@ def test_rejects_invalid_cached_content_without_requesting_network(
         )
 
     assert requests == 0
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("competition_code", ".."),
+        ("competition_code", "../escaped"),
+        ("competition_code", "/absolute"),
+        ("competition_code", "nested/path"),
+        ("competition_code", r"nested\path"),
+        ("season", ".."),
+        ("season", r"C:\escaped"),
+    ],
+)
+def test_rejects_unsafe_cache_path_identifier_before_network_or_write(
+    tmp_path: Path, source_file: SourceFile, field: str, value: str
+) -> None:
+    """若允许路径分隔符、父目录或绝对标识符逃逸 raw_root，此测试应失败。"""
+    request = replace(source_file, **{field: value})
+    raw_root = tmp_path / "raw"
+    requests = 0
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        raise AssertionError("unsafe identifier must be rejected before HTTP")
+
+    with pytest.raises(DownloadValidationError, match="invalid_cache_path"):
+        FootballDataDownloader(_client(httpx.MockTransport(handler)), raw_root).download(
+            request
+        )
+
+    assert requests == 0
+    assert not list(tmp_path.rglob("matches.csv"))
