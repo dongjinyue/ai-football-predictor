@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import duckdb
@@ -10,7 +11,7 @@ import pytest
 
 from app.imports.models import MarketRecord, MatchRecord, ParsedFile, SourceFile
 from app.imports.parser import parse_football_data_csv
-from app.imports.repository import ImportRepository, RepositoryError
+from app.imports.repository import ImportRepository, RepositoryError, normalize_alias
 
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "football_data_e0_2324.csv"
@@ -181,3 +182,86 @@ def test_repository_rolls_back_all_business_rows_and_preserves_failed_audit(
         assert connection.execute(
             "SELECT status, error_code FROM import_files WHERE id = ?", [file_id]
         ).fetchone() == ("failed", "database_error")
+
+
+def test_finish_run_rejects_incomplete_requested_scope_and_keeps_audit_running(
+    tmp_path: Path, source_file: SourceFile
+) -> None:
+    """尚未生成或处理完所有请求文件时，不能把运行伪装成已完成。"""
+    repository = ImportRepository(tmp_path / "incomplete.duckdb")
+    run_id = repository.start_run(source_file.source, requested_files=2)
+    repository.start_file(run_id, source_file)
+
+    with pytest.raises(RepositoryError, match="incomplete_run"):
+        repository.finish_run(run_id)
+
+    assert repository.latest_run().status == "running"
+
+
+def test_start_file_rejects_run_that_has_already_finished(
+    tmp_path: Path, source_file: SourceFile, parsed_file: ParsedFile
+) -> None:
+    """结束后的运行不允许补写审计文件，防止汇总计数被事后改变。"""
+    repository = ImportRepository(tmp_path / "finished.duckdb")
+    run_id = _import_once(repository, source_file, parsed_file)
+
+    with pytest.raises(RepositoryError, match="invalid_run_state"):
+        repository.start_file(run_id, source_file)
+
+
+def test_repository_rejects_kickoff_bound_market_not_tied_to_match_kickoff(
+    tmp_path: Path, source_file: SourceFile, parsed_file: ParsedFile
+) -> None:
+    """kickoff_bound 收盘赔率只能在开球时可用，不能被提前时间绕过回测边界。"""
+    repository = ImportRepository(tmp_path / "timing.duckdb")
+    match = parsed_file.matches[0]
+    invalid_market = replace(
+        match.markets[0],
+        captured_at=match.kickoff_at - timedelta(minutes=1),
+        available_at=match.kickoff_at - timedelta(minutes=1),
+    )
+    invalid_file = ParsedFile(
+        matches=(replace(match, markets=(invalid_market,)),), skipped_rows=0, errors=()
+    )
+    run_id = repository.start_run(source_file.source, requested_files=1)
+    file_id = repository.start_file(run_id, source_file)
+
+    with pytest.raises(RepositoryError, match="invalid_record"):
+        repository.import_parsed_file(file_id, source_file, invalid_file)
+
+    assert _counts(repository.database_path)["matches"] == 0
+
+
+def test_repository_rejects_alias_owned_by_a_different_team(
+    tmp_path: Path, source_file: SourceFile, parsed_file: ParsedFile
+) -> None:
+    """来源别名冲突必须显式失败，不能由 INSERT OR IGNORE 吞掉。"""
+    repository = ImportRepository(tmp_path / "alias-conflict.duckdb")
+    match = parsed_file.matches[0]
+    with duckdb.connect(str(repository.database_path)) as connection:
+        connection.execute("INSERT INTO teams (id, name_zh) VALUES ('other-team', 'Other')")
+        connection.execute(
+            """
+            INSERT INTO team_aliases (id, team_id, source, alias, normalized_alias)
+            VALUES ('other-alias', 'other-team', ?, ?, ?)
+            """,
+            [source_file.source, match.home_team, normalize_alias(match.home_team)],
+        )
+    run_id = repository.start_run(source_file.source, requested_files=1)
+    file_id = repository.start_file(run_id, source_file)
+
+    with pytest.raises(RepositoryError, match="source_fact_conflict"):
+        repository.import_parsed_file(file_id, source_file, parsed_file)
+
+
+def test_repository_rejects_file_when_source_url_differs_from_audit_record(
+    tmp_path: Path, source_file: SourceFile, parsed_file: ParsedFile
+) -> None:
+    """文件审计必须绑定完整来源地址，不能只比较联赛和赛季。"""
+    repository = ImportRepository(tmp_path / "url-mismatch.duckdb")
+    run_id = repository.start_run(source_file.source, requested_files=1)
+    file_id = repository.start_file(run_id, source_file)
+    different_url = replace(source_file, url="https://example.invalid/replaced.csv")
+
+    with pytest.raises(RepositoryError, match="invalid_file_state"):
+        repository.import_parsed_file(file_id, different_url, parsed_file)

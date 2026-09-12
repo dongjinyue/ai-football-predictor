@@ -71,6 +71,11 @@ class ImportRepository:
         file_id = str(uuid.uuid4())
         try:
             with self._connect() as connection:
+                run = connection.execute(
+                    "SELECT status FROM import_runs WHERE id = ?", [run_id]
+                ).fetchone()
+                if run is None or run[0] != "running":
+                    raise RepositoryError("invalid_run_state")
                 connection.execute(
                     """
                     INSERT INTO import_files (
@@ -183,21 +188,27 @@ class ImportRepository:
         """依据文件审计汇总运行状态，避免协调器自行计算而产生口径漂移。"""
         with self._connect() as connection:
             run = connection.execute(
-                "SELECT source, requested_files FROM import_runs WHERE id = ?", [run_id]
+                "SELECT source, requested_files, status FROM import_runs WHERE id = ?", [run_id]
             ).fetchone()
             if run is None:
                 raise RepositoryError("unknown_run")
-            completed, failed, imported, skipped = connection.execute(
+            completed, failed, pending, total, imported, skipped = connection.execute(
                 """
                 SELECT
                     COUNT(*) FILTER (WHERE status = 'completed'),
                     COUNT(*) FILTER (WHERE status = 'failed'),
+                    COUNT(*) FILTER (WHERE status = 'pending'),
+                    COUNT(*),
                     COALESCE(SUM(imported_matches) FILTER (WHERE status = 'completed'), 0),
                     COALESCE(SUM(skipped_rows) FILTER (WHERE status = 'completed'), 0)
                 FROM import_files WHERE run_id = ?
                 """,
                 [run_id],
             ).fetchone()
+            if run[2] != "running":
+                raise RepositoryError("invalid_run_state")
+            if pending or total != run[1] or completed + failed != run[1]:
+                raise RepositoryError("incomplete_run")
             errors = tuple(
                 row[0]
                 for row in connection.execute(
@@ -253,12 +264,13 @@ class ImportRepository:
     @staticmethod
     def _assert_pending_file(connection: duckdb.DuckDBPyConnection, file_id: str, source_file: SourceFile) -> None:
         row = connection.execute(
-            "SELECT source, competition_code, season, status FROM import_files WHERE id = ?", [file_id]
+            "SELECT source, competition_code, season, source_url, status FROM import_files WHERE id = ?", [file_id]
         ).fetchone()
-        if row is None or row[3] != "pending" or row[:3] != (
+        if row is None or row[4] != "pending" or row[:4] != (
             source_file.source,
             source_file.competition_code,
             source_file.season,
+            source_file.url,
         ):
             raise RepositoryError("invalid_file_state")
 
@@ -312,7 +324,7 @@ class ImportRepository:
                 [match_id, *facts[:9], source_file.source, natural_identity, facts[9]],
             )
         for market in match.markets:
-            self._write_market(connection, match_id, market)
+            self._write_market(connection, match_id, kickoff_at, market)
         return int(existing is None)
 
     @staticmethod
@@ -321,6 +333,14 @@ class ImportRepository:
         if not normalized:
             raise RepositoryError("invalid_record")
         team_id = stable_id("team", source, normalized)
+        # team_aliases 的业务自然键是 (source, normalized_alias)，不能只查本次
+        # 计算出的 UUID；否则异常的既有行会被 INSERT OR IGNORE 静默掩盖。
+        alias_owner = connection.execute(
+            "SELECT team_id FROM team_aliases WHERE source = ? AND normalized_alias = ?",
+            [source, normalized],
+        ).fetchone()
+        if alias_owner is not None and alias_owner[0] != team_id:
+            raise RepositoryError("source_fact_conflict")
         connection.execute(
             "INSERT OR IGNORE INTO teams (id, name_zh) VALUES (?, ?)", [team_id, alias.strip()]
         )
@@ -338,10 +358,23 @@ class ImportRepository:
         return team_id
 
     @staticmethod
-    def _write_market(connection: duckdb.DuckDBPyConnection, match_id: str, market) -> None:
+    def _write_market(
+        connection: duckdb.DuckDBPyConnection,
+        match_id: str,
+        kickoff_at: datetime,
+        market,
+    ) -> None:
         captured_at = _utc(market.captured_at)
         available_at = _utc(market.available_at)
         if captured_at > available_at:
+            raise RepositoryError("invalid_record")
+        # Football-Data 的收盘赔率没有真实采集时间。kickoff_bound 只能表示
+        # “开球时才可确认”的 closing 快照，不能被伪造为赛前可用数据。
+        if market.time_precision == "kickoff_bound" and (
+            market.stage != "closing"
+            or captured_at != kickoff_at
+            or available_at != kickoff_at
+        ):
             raise RepositoryError("invalid_record")
         handicap_key = "none" if market.line is None else f"{market.line:.2f}"
         snapshot_id = stable_id("market_snapshot", match_id, market.source, market.provider, market.market_type, handicap_key, captured_at.isoformat(), market.stage)
