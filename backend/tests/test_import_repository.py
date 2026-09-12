@@ -209,6 +209,27 @@ def test_start_file_rejects_run_that_has_already_finished(
         repository.start_file(run_id, source_file)
 
 
+def test_record_download_persists_only_consistent_pending_file_audit(
+    tmp_path: Path, source_file: SourceFile
+) -> None:
+    """下载元数据只能补充 pending 审计；矛盾重试不能覆盖首次来源事实。"""
+    repository = ImportRepository(tmp_path / "download-audit.duckdb")
+    run_id = repository.start_run(source_file.source, requested_files=1)
+    file_id = repository.start_file(run_id, source_file)
+    downloaded_at = datetime(2026, 9, 10, 12, tzinfo=timezone.utc)
+
+    repository.record_download(file_id, "raw/E0/matches.csv", "checksum", downloaded_at)
+    repository.record_download(file_id, "raw/E0/matches.csv", "checksum", downloaded_at)
+
+    with pytest.raises(RepositoryError, match="download_audit_conflict"):
+        repository.record_download(file_id, "raw/E0/other.csv", "other", downloaded_at)
+    with duckdb.connect(str(repository.database_path), read_only=True) as connection:
+        assert connection.execute(
+            "SELECT local_path, sha256, epoch_ms(downloaded_at) FROM import_files WHERE id = ?",
+            [file_id],
+        ).fetchone() == ("raw/E0/matches.csv", "checksum", 1789041600000)
+
+
 def test_repository_rejects_kickoff_bound_market_not_tied_to_match_kickoff(
     tmp_path: Path, source_file: SourceFile, parsed_file: ParsedFile
 ) -> None:

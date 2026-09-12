@@ -51,8 +51,26 @@ def test_initialize_database_can_run_twice_without_losing_schema(
     status = get_database_status(database_path)
     assert status.ready is True
     assert status.engine == "duckdb"
-    assert status.schema_version == 3
+    assert status.schema_version == 4
     assert status.table_count == 9
+
+
+def test_initialize_database_upgrades_real_v3_audit_schema_to_v4(
+    tmp_path: Path,
+) -> None:
+    """004 必须为已有 v3 数据库增加下载审计时间，而非重写 003。"""
+    database_path = tmp_path / "v3-history.duckdb"
+    schema_path = Path(__file__).parents[1] / "app" / "schema.sql"
+    migration_path = Path(__file__).parents[1] / "app" / "migrations" / "003_import_audit.sql"
+    with duckdb.connect(str(database_path)) as connection:
+        connection.execute(schema_path.read_text(encoding="utf-8"))
+        connection.execute(migration_path.read_text(encoding="utf-8"))
+
+    initialize_database(database_path)
+    initialize_database(database_path)
+
+    assert get_database_status(database_path).schema_version == 4
+    assert column_details(database_path, "import_files")["downloaded_at"] == "TIMESTAMP WITH TIME ZONE"
 
 
 def test_initialize_database_upgrades_v1_schema_without_losing_data(

@@ -27,8 +27,11 @@ def _source_file(code: str) -> SourceFile:
 @dataclass
 class _FakeDownloader:
     failures: dict[str, Exception]
+    before_download: callable | None = None
 
     def download(self, request: SourceFile) -> DownloadedFile:
+        if self.before_download is not None:
+            self.before_download()
         if error := self.failures.get(request.competition_code):
             raise error
         content = b"Date,HomeTeam,AwayTeam,FTHG,FTAG\n01/01/24,Home,Away,1,0\n"
@@ -50,9 +53,12 @@ class _FakeRepository:
         self.file_counter = 0
         self.run_id = "run-1"
         self.requested_files = 0
+        self.start_run_calls: list[tuple[str, int]] = []
+        self.download_audits: dict[str, tuple[str, str, datetime]] = {}
 
     def start_run(self, source: str, requested_files: int) -> str:
         assert source == "football_data"
+        self.start_run_calls.append((source, requested_files))
         self.requested_files = requested_files
         return self.run_id
 
@@ -60,16 +66,18 @@ class _FakeRepository:
         self,
         run_id: str,
         source_file: SourceFile,
-        *,
-        local_path: str | None = None,
-        sha256: str | None = None,
     ) -> str:
         assert run_id == self.run_id
         self.file_counter += 1
         file_id = f"file-{self.file_counter}"
-        assert (local_path is None) == (sha256 is None)
         self.files[file_id] = (source_file, "pending", 0, 0, ())
         return file_id
+
+    def record_download(
+        self, file_id: str, *, local_path: str, sha256: str, downloaded_at: datetime
+    ) -> None:
+        assert self.files[file_id][1] == "pending"
+        self.download_audits[file_id] = (local_path, sha256, downloaded_at)
 
     def import_parsed_file(
         self, file_id: str, source_file: SourceFile, parsed_file: ParsedFile
@@ -118,6 +126,38 @@ def test_continues_after_middle_file_failure_and_returns_repository_summary() ->
 
     assert result == ImportRunResult("run-1", "completed_with_errors", 3, 2, 1, 0, 0, ("timeout",))
     assert [item[1] for item in repository.files.values()] == ["completed", "failed", "completed"]
+
+
+def test_starts_pending_file_before_download_and_persists_download_audit() -> None:
+    """若下载在文件审计之前发生，下载器观察不到 pending 记录，测试将失败。"""
+    from app.imports.service import ImportService
+
+    repository = _FakeRepository()
+
+    def assert_pending_audit_exists() -> None:
+        assert [item[1] for item in repository.files.values()] == ["pending"]
+
+    result = ImportService(
+        _FakeDownloader({}, before_download=assert_pending_audit_exists), _parser, repository
+    ).run((_source_file("E0"),))
+
+    assert result.status == "completed"
+    assert repository.download_audits == {
+        "file-1": ("raw\\E0\\matches.csv", "safe-checksum", datetime(2026, 9, 10, tzinfo=timezone.utc))
+    }
+
+
+def test_mixed_sources_are_rejected_before_creating_a_run() -> None:
+    """若不先验证来源，运行会被错误归属给第一个来源，测试将失败。"""
+    from app.imports.service import ImportService, ImportServiceError
+
+    repository = _FakeRepository()
+    other_source = SourceFile("another_source", "E1", "Other", "ENG", "2324", "https://example.test/E1.csv")
+
+    with pytest.raises(ImportServiceError, match="mixed_sources"):
+        ImportService(_FakeDownloader({}), _parser, repository).run((_source_file("E0"), other_source))
+
+    assert repository.start_run_calls == []
 
 
 def test_all_success_uses_repository_authoritative_totals() -> None:

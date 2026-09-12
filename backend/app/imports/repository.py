@@ -98,6 +98,53 @@ class ImportRepository:
             raise RepositoryError("audit_write_failed") from error
         return file_id
 
+    def record_download(
+        self,
+        file_id: str,
+        local_path: str,
+        sha256: str,
+        downloaded_at: datetime,
+    ) -> None:
+        """补充 pending 文件的下载审计，绝不触碰比赛或市场时间。"""
+        if not local_path or not sha256:
+            raise RepositoryError("invalid_download_audit")
+        try:
+            audited_at = _utc(downloaded_at)
+        except (TypeError, ValueError) as error:
+            raise RepositoryError("invalid_download_audit") from error
+
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    """
+                    SELECT status, local_path, sha256, epoch_ms(downloaded_at)
+                    FROM import_files WHERE id = ?
+                    """,
+                    [file_id],
+                ).fetchone()
+                if row is None or row[0] != "pending":
+                    raise RepositoryError("invalid_file_state")
+
+                existing = row[1:]
+                candidate = (local_path, sha256, _epoch_milliseconds(audited_at))
+                if any(value is not None for value in existing):
+                    if existing != candidate:
+                        raise RepositoryError("download_audit_conflict")
+                    return
+
+                connection.execute(
+                    """
+                    UPDATE import_files
+                    SET local_path = ?, sha256 = ?, downloaded_at = ?
+                    WHERE id = ? AND status = 'pending'
+                    """,
+                    [local_path, sha256, audited_at, file_id],
+                )
+        except RepositoryError:
+            raise
+        except duckdb.Error as error:
+            raise RepositoryError("audit_write_failed") from error
+
     def import_parsed_file(
         self,
         file_id: str,
