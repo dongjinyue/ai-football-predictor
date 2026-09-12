@@ -37,8 +37,8 @@ CREATE TABLE IF NOT EXISTS import_files (
     local_path VARCHAR,
     sha256 VARCHAR,
     status VARCHAR NOT NULL CHECK (status IN ('pending', 'completed', 'failed')),
-    imported_matches INTEGER NOT NULL DEFAULT 0,
-    skipped_rows INTEGER NOT NULL DEFAULT 0,
+    imported_matches INTEGER NOT NULL DEFAULT 0 CHECK (imported_matches >= 0),
+    skipped_rows INTEGER NOT NULL DEFAULT 0 CHECK (skipped_rows >= 0),
     error_code VARCHAR,
     UNIQUE (run_id, source_url)
 );

@@ -267,3 +267,32 @@ def test_market_outcome_unique_key_rejects_duplicate_outcome_code(
         connection.execute(insert_sql, ["outcome-1"])
         with pytest.raises(duckdb.ConstraintException):
             connection.execute(insert_sql, ["outcome-2"])
+
+
+@pytest.mark.parametrize("counter_column", ["imported_matches", "skipped_rows"])
+def test_import_file_rejects_negative_counters(
+    tmp_path: Path,
+    counter_column: str,
+) -> None:
+    """文件级导入统计必须是非负数，避免审计记录出现无效计数。"""
+    database_path = tmp_path / "football.duckdb"
+    initialize_database(database_path)
+
+    with duckdb.connect(str(database_path)) as connection:
+        connection.execute(
+            """
+            INSERT INTO import_runs (id, source, status, requested_files, started_at)
+            VALUES ('run-1', 'football_data', 'running', 1,
+                    TIMESTAMPTZ '2026-01-01 12:00:00+00')
+            """
+        )
+        with pytest.raises(duckdb.ConstraintException):
+            connection.execute(
+                f"""
+                INSERT INTO import_files
+                    (id, run_id, source, competition_code, season, source_url, status,
+                     {counter_column})
+                VALUES ('file-1', 'run-1', 'football_data', 'E0', '2526',
+                        'https://example.test/E0.csv', 'pending', -1)
+                """
+            )
