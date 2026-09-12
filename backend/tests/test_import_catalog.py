@@ -69,8 +69,10 @@ def test_default_requests_cover_each_configured_league_once_per_season() -> None
         competition[0] for competition in COMPETITIONS
     }
     assert all(item.source == "football_data" for item in requests)
+    # Football-Data 的 www 地址会重定向；目录必须直接生成官方规范地址，
+    # 让下载器不需要泛化为跟随任意第三方重定向。
     assert all(
-        item.url.startswith("https://www.football-data.co.uk/mmz4281/")
+        item.url.startswith("https://football-data.co.uk/mmz4281/")
         for item in requests
     )
 
@@ -95,7 +97,7 @@ def test_default_requests_use_completed_seasons_for_each_season_style() -> None:
     assert split_year_seasons == {"2526", "2425", "2324", "2223", "2122"}
     assert calendar_year_seasons == {"2025", "2024", "2023", "2022", "2021"}
     assert (
-        "https://www.football-data.co.uk/mmz4281/2526/E0.csv"
+        "https://football-data.co.uk/mmz4281/2526/E0.csv"
         in {item.url for item in requests}
     )
 

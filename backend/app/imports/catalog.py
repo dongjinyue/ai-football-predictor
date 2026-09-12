@@ -4,7 +4,9 @@ from datetime import date
 
 from app.imports.models import SourceFile
 
-FOOTBALL_DATA_URL_TEMPLATE = "https://www.football-data.co.uk/mmz4281/{season}/{code}.csv"
+# www 地址会返回重定向；只生成 Football-Data 当前公开的规范非 www 地址，
+# 下载器因此无需无边界地跟随任意外部重定向。
+FOOTBALL_DATA_URL_TEMPLATE = "https://football-data.co.uk/mmz4281/{season}/{code}.csv"
 SPLIT_YEAR = "split_year"
 CALENDAR_YEAR = "calendar_year"
 

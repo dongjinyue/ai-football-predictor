@@ -178,7 +178,7 @@ requests = build_default_requests(date(2026, 9, 10), seasons=5)
 assert requests
 assert len({item.url for item in requests}) == len(requests)
 assert all(item.source == "football_data" for item in requests)
-assert all(item.url.startswith("https://www.football-data.co.uk/mmz4281/") for item in requests)
+assert all(item.url.startswith("https://football-data.co.uk/mmz4281/") for item in requests)
 assert len({item.season for item in requests}) == 5
 ```
 
@@ -234,7 +234,7 @@ Define `ParsedFile`, `FileImportResult`, and `ImportRunResult` with tuple-based 
 
 - [ ] **Step 4: Implement the configured source catalog**
 
-Define each Football-Data competition once as `(code, name, country_code, season_style)`. Generate URLs as `https://www.football-data.co.uk/mmz4281/{season}/{code}.csv`. For September 2026, completed split-year seasons are `2526` through `2122`; calendar-year competitions use their corresponding last completed calendar years.
+Define each Football-Data competition once as `(code, name, country_code, season_style)`. Generate URLs as `https://football-data.co.uk/mmz4281/{season}/{code}.csv`. For September 2026, completed split-year seasons are `2526` through `2122`; calendar-year competitions use their corresponding last completed calendar years.
 
 - [ ] **Step 5: Run tests and commit**
 
@@ -536,11 +536,11 @@ git commit -m "feat: expose historical import API"
 - Consumes: completed import pipeline and API
 - Produces: reproducible local operating instructions and verification evidence
 
-- [ ] **Step 1: Document source, storage, limits, and endpoints**
+- [x] **Step 1: Document source, storage, limits, and endpoints**
 
 Add `FOOTBALL_DATA_RAW_PATH=data/raw/football_data` to `.env.example`. Ensure `.gitignore` excludes raw downloaded CSV files while preserving committed test fixtures. Document attribution, default five-season scope, supported market limitations, and all three API endpoints.
 
-- [ ] **Step 2: Run all offline verification**
+- [x] **Step 2: Run all offline verification**
 
 From `backend/`:
 
@@ -559,11 +559,11 @@ git diff --check
 
 Expected: backend and frontend tests PASS, lint exits 0, Vite production build succeeds, and `git diff --check` prints no errors.
 
-- [ ] **Step 3: Run one controlled live source smoke test**
+- [x] **Step 3: Run one controlled live source smoke test**
 
 Import one known league-season file into a temporary DuckDB path, not the default project database. Verify at least one match and one market outcome are stored. If the external source is unavailable, record the network failure separately; offline tests remain the release gate.
 
-- [ ] **Step 4: Verify Git safety**
+- [x] **Step 4: Verify Git safety**
 
 ```bash
 git status --short
@@ -573,7 +573,7 @@ git ls-files data/raw data/processed
 
 Expected: downloaded raw files and DuckDB files are ignored, and no runtime data appears in tracked files.
 
-- [ ] **Step 5: Mark plan checkboxes, commit docs, and inspect branch**
+- [x] **Step 5: Mark plan checkboxes, commit docs, and inspect branch**
 
 ```bash
 git add README.md .env.example .gitignore docs/superpowers/plans/2026-09-10-historical-data-import.md
