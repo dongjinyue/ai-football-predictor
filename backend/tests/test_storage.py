@@ -8,6 +8,9 @@ from app.storage import get_database_status, initialize_database
 
 REQUIRED_TABLES = {
     "competitions",
+    "import_files",
+    "import_runs",
+    "market_outcomes",
     "market_snapshots",
     "matches",
     "schema_migrations",
@@ -48,8 +51,8 @@ def test_initialize_database_can_run_twice_without_losing_schema(
     status = get_database_status(database_path)
     assert status.ready is True
     assert status.engine == "duckdb"
-    assert status.schema_version == 2
-    assert status.table_count == 6
+    assert status.schema_version == 3
+    assert status.table_count == 9
 
 
 def test_initialize_database_upgrades_v1_schema_without_losing_data(
@@ -216,3 +219,51 @@ def test_market_snapshot_preserves_quarter_handicap(tmp_path: Path) -> None:
         ).fetchone()[0]
 
     assert str(handicap) == "0.25"
+
+
+def test_market_outcome_unique_key_rejects_duplicate_outcome_code(
+    tmp_path: Path,
+) -> None:
+    """同一快照的同一结果只能保存一次，避免导入重复赔率。"""
+    database_path = tmp_path / "football.duckdb"
+    initialize_database(database_path)
+
+    with duckdb.connect(str(database_path)) as connection:
+        connection.execute(
+            "INSERT INTO competitions (id, name_zh, source, source_competition_id) VALUES ('c', '联赛', 'test', 'c')"
+        )
+        connection.execute(
+            "INSERT INTO teams (id, name_zh) VALUES ('h', '主队'), ('a', '客队')"
+        )
+        connection.execute(
+            """
+            INSERT INTO matches
+                (id, competition_id, season, kickoff_at, home_team_id, away_team_id,
+                 status, source, source_match_id, available_at)
+            VALUES ('m', 'c', '2526', TIMESTAMPTZ '2026-01-01 12:00:00+00',
+                    'h', 'a', 'finished', 'test', 'm',
+                    TIMESTAMPTZ '2026-01-01 12:00:00+00')
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO market_snapshots
+                (id, match_id, provider, source, market_type, handicap, handicap_key,
+                 home_value, draw_value, away_value, captured_at, available_at,
+                 stage, time_precision)
+            VALUES ('s', 'm', 'average', 'football_data', 'match_result', NULL,
+                    'none', 2.0, 3.0, 4.0,
+                    TIMESTAMPTZ '2026-01-01 12:00:00+00',
+                    TIMESTAMPTZ '2026-01-01 12:00:00+00', 'closing',
+                    'kickoff_bound')
+            """
+        )
+        outcome_values = "VALUES (?, 's', 'home', 2.0, 0.5, 'B365H')"
+        insert_sql = """
+            INSERT INTO market_outcomes
+                (id, snapshot_id, outcome_code, odds_value, normalized_probability,
+                 source_field)
+        """ + outcome_values
+        connection.execute(insert_sql, ["outcome-1"])
+        with pytest.raises(duckdb.ConstraintException):
+            connection.execute(insert_sql, ["outcome-2"])
