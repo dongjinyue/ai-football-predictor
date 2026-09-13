@@ -115,10 +115,10 @@ def test_list_matches_returns_latest_page_with_closing_market_views(
     assert all(market.stage == "closing" for market in page.items[0].markets)
 
 
-def test_list_matches_filters_by_competition_season_and_case_insensitive_team(
+def test_list_matches_filters_by_competition_code_season_and_case_insensitive_team(
     tmp_path: Path, source_file: SourceFile, parsed_file: ParsedFile
 ) -> None:
-    """联赛和赛季精确筛选；球队名称则支持大小写无关的包含匹配。"""
+    """来源联赛代码和赛季精确筛选；球队名称支持大小写无关的包含匹配。"""
     repository = ImportRepository(tmp_path / "match-filters.duckdb")
     _import_once(repository, source_file, parsed_file)
     german_source = replace(
@@ -131,7 +131,7 @@ def test_list_matches_filters_by_competition_season_and_case_insensitive_team(
     _import_once(repository, german_source, parsed_file)
 
     competition_page = repository.list_matches(
-        MatchQuery(competition="English Premier League")
+        MatchQuery(competition="E0")
     )
     season_page = repository.list_matches(MatchQuery(season="2425"))
     team_page = repository.list_matches(MatchQuery(team="bUrNl"))
@@ -141,6 +141,7 @@ def test_list_matches_filters_by_competition_season_and_case_insensitive_team(
     ]
     assert [item.season for item in season_page.items] == ["2425"]
     assert len(team_page.items) == 2
+    assert competition_page.filters.competitions == ("D1", "E0")
 
 
 def test_list_matches_returns_empty_page_for_unknown_or_literal_wildcard_filter(
@@ -150,13 +151,21 @@ def test_list_matches_returns_empty_page_for_unknown_or_literal_wildcard_filter(
     repository = ImportRepository(tmp_path / "empty-filter.duckdb")
     _import_once(repository, source_file, parsed_file)
 
-    unknown_page = repository.list_matches(MatchQuery(competition="Unknown League"))
+    unknown_page = repository.list_matches(MatchQuery(competition="unknown-code"))
     percent_page = repository.list_matches(MatchQuery(team="%"))
 
     assert unknown_page.total_items == 0
     assert unknown_page.total_pages == 0
     assert unknown_page.items == ()
     assert percent_page.items == ()
+
+
+def test_list_matches_rejects_page_size_larger_than_100(tmp_path: Path) -> None:
+    """仓储分页契约限制每页 1 至 100 条，避免无界读取。"""
+    repository = ImportRepository(tmp_path / "page-size-boundary.duckdb")
+
+    with pytest.raises(ValueError, match="page_size must be between 1 and 100"):
+        repository.list_matches(MatchQuery(page=1, page_size=101))
 
 
 def test_list_matches_keeps_matches_without_odds_and_respects_second_page(

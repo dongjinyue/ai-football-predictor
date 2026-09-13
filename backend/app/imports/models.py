@@ -103,7 +103,7 @@ class ImportRunAudit:
 
 @dataclass(frozen=True)
 class MatchQuery:
-    """历史比赛列表的分页和可选筛选条件。"""
+    """历史比赛列表的分页和可选筛选条件，联赛使用来源代码。"""
 
     page: int = 1
     page_size: int = 20
@@ -139,7 +139,7 @@ class HistoricalMatchView:
 
 @dataclass(frozen=True)
 class MatchFilterOptions:
-    """历史比赛浏览器可选的联赛与赛季，均为稳定排序的文本。"""
+    """历史比赛浏览器可选的来源联赛代码与赛季，均为稳定排序的文本。"""
 
     competitions: tuple[str, ...]
     seasons: tuple[str, ...]

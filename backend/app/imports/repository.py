@@ -335,8 +335,10 @@ class ImportRepository:
 
     def list_matches(self, query: MatchQuery) -> MatchPage:
         """按筛选条件分页读取比赛，并批量组合当前页的 closing 赔率。"""
-        if query.page < 1 or query.page_size < 1:
-            raise ValueError("page and page_size must be positive")
+        if query.page < 1:
+            raise ValueError("page must be positive")
+        if not 1 <= query.page_size <= 100:
+            raise ValueError("page_size must be between 1 and 100")
 
         conditions, parameters = _match_filter_sql(query)
         where_clause = f" WHERE {' AND '.join(conditions)}" if conditions else ""
@@ -375,7 +377,11 @@ class ImportRepository:
                 competitions=tuple(
                     row[0]
                     for row in connection.execute(
-                        "SELECT name_zh FROM competitions ORDER BY name_zh, id"
+                        """
+                        SELECT DISTINCT source_competition_id
+                        FROM competitions
+                        ORDER BY source_competition_id
+                        """
                     ).fetchall()
                 ),
                 seasons=tuple(
@@ -597,7 +603,7 @@ def _match_filter_sql(query: MatchQuery) -> tuple[list[str], list[str]]:
     conditions: list[str] = []
     parameters: list[str] = []
     if query.competition:
-        conditions.append("competition.name_zh = ?")
+        conditions.append("competition.source_competition_id = ?")
         parameters.append(query.competition)
     if query.season:
         conditions.append("match.season = ?")
