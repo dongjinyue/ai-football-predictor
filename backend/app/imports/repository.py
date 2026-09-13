@@ -638,8 +638,10 @@ def _load_closing_markets(
     rows = connection.execute(
         f"""
         SELECT
-            snapshot.match_id, snapshot.id, snapshot.market_type, snapshot.stage,
-            snapshot.time_precision, snapshot.handicap, outcome.outcome_code, outcome.odds_value
+            snapshot.match_id, snapshot.id, snapshot.provider, snapshot.source,
+            snapshot.market_type, snapshot.stage, snapshot.time_precision,
+            CAST(snapshot.captured_at AS VARCHAR), CAST(snapshot.available_at AS VARCHAR),
+            snapshot.handicap, outcome.outcome_code, outcome.odds_value
         FROM market_snapshots AS snapshot
         LEFT JOIN market_outcomes AS outcome ON outcome.snapshot_id = snapshot.id
         WHERE snapshot.match_id IN ({placeholders}) AND snapshot.stage = 'closing'
@@ -653,6 +655,10 @@ def _load_closing_markets(
     current_type: str | None = None
     current_stage: str | None = None
     current_time_precision: str | None = None
+    current_source: str | None = None
+    current_provider: str | None = None
+    current_captured_at: datetime | None = None
+    current_available_at: datetime | None = None
     current_line: float | None = None
     current_outcomes: list[tuple[str, float]] = []
 
@@ -663,6 +669,10 @@ def _load_closing_markets(
             or current_type is None
             or current_stage is None
             or current_time_precision is None
+            or current_source is None
+            or current_provider is None
+            or current_captured_at is None
+            or current_available_at is None
         ):
             return
         grouped.setdefault(current_match_id, []).append(
@@ -670,12 +680,29 @@ def _load_closing_markets(
                 market_type=current_type,
                 stage=current_stage,
                 time_precision=current_time_precision,
+                source=current_source,
+                provider=current_provider,
+                captured_at=current_captured_at,
+                available_at=current_available_at,
                 line=current_line,
                 outcomes=tuple(current_outcomes),
             )
         )
 
-    for match_id, snapshot_id, market_type, stage, time_precision, line, outcome_code, odds_value in rows:
+    for (
+        match_id,
+        snapshot_id,
+        provider,
+        source,
+        market_type,
+        stage,
+        time_precision,
+        captured_at,
+        available_at,
+        line,
+        outcome_code,
+        odds_value,
+    ) in rows:
         if snapshot_id != current_snapshot_id:
             finish_market()
             current_snapshot_id = snapshot_id
@@ -683,6 +710,10 @@ def _load_closing_markets(
             current_type = market_type
             current_stage = stage
             current_time_precision = time_precision
+            current_source = source
+            current_provider = provider
+            current_captured_at = _parse_database_timestamp(captured_at)
+            current_available_at = _parse_database_timestamp(available_at)
             current_line = float(line) if line is not None else None
             current_outcomes = []
         if outcome_code is not None:

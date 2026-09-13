@@ -118,6 +118,11 @@ def test_list_matches_returns_latest_page_with_closing_market_views(
     }
     assert all(market.stage == "closing" for market in page.items[0].markets)
     assert {market.time_precision for market in page.items[0].markets} == {"kickoff_bound"}
+    assert {market.source for market in page.items[0].markets} == {"football_data"}
+    assert {market.provider for market in page.items[0].markets} == {"average"}
+    assert {
+        (market.captured_at, market.available_at) for market in page.items[0].markets
+    } == {(datetime(2023, 8, 18, 20, tzinfo=timezone.utc),) * 2}
 
 
 def test_list_matches_filters_by_competition_code_season_and_case_insensitive_team(
