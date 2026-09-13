@@ -639,7 +639,7 @@ def _load_closing_markets(
         f"""
         SELECT
             snapshot.match_id, snapshot.id, snapshot.market_type, snapshot.stage,
-            snapshot.handicap, outcome.outcome_code, outcome.odds_value
+            snapshot.time_precision, snapshot.handicap, outcome.outcome_code, outcome.odds_value
         FROM market_snapshots AS snapshot
         LEFT JOIN market_outcomes AS outcome ON outcome.snapshot_id = snapshot.id
         WHERE snapshot.match_id IN ({placeholders}) AND snapshot.stage = 'closing'
@@ -652,28 +652,37 @@ def _load_closing_markets(
     current_match_id: str | None = None
     current_type: str | None = None
     current_stage: str | None = None
+    current_time_precision: str | None = None
     current_line: float | None = None
     current_outcomes: list[tuple[str, float]] = []
 
     def finish_market() -> None:
-        if current_snapshot_id is None or current_match_id is None or current_type is None or current_stage is None:
+        if (
+            current_snapshot_id is None
+            or current_match_id is None
+            or current_type is None
+            or current_stage is None
+            or current_time_precision is None
+        ):
             return
         grouped.setdefault(current_match_id, []).append(
             MatchMarketView(
                 market_type=current_type,
                 stage=current_stage,
+                time_precision=current_time_precision,
                 line=current_line,
                 outcomes=tuple(current_outcomes),
             )
         )
 
-    for match_id, snapshot_id, market_type, stage, line, outcome_code, odds_value in rows:
+    for match_id, snapshot_id, market_type, stage, time_precision, line, outcome_code, odds_value in rows:
         if snapshot_id != current_snapshot_id:
             finish_market()
             current_snapshot_id = snapshot_id
             current_match_id = match_id
             current_type = market_type
             current_stage = stage
+            current_time_precision = time_precision
             current_line = float(line) if line is not None else None
             current_outcomes = []
         if outcome_code is not None:

@@ -117,6 +117,7 @@ def test_list_matches_returns_latest_page_with_closing_market_views(
         "asian_handicap",
     }
     assert all(market.stage == "closing" for market in page.items[0].markets)
+    assert {market.time_precision for market in page.items[0].markets} == {"kickoff_bound"}
 
 
 def test_list_matches_filters_by_competition_code_season_and_case_insensitive_team(

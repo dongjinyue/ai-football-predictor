@@ -103,6 +103,7 @@ class MatchMarketResponse(BaseModel):
 
     market_type: str
     stage: str
+    time_precision: str
     line: float | None
     outcomes: tuple[MarketOutcomeResponse, ...]
 
@@ -281,6 +282,7 @@ def _historical_match_response(match: HistoricalMatchView) -> HistoricalMatchRes
             MatchMarketResponse(
                 market_type=market.market_type,
                 stage=market.stage,
+                time_precision=market.time_precision,
                 line=market.line,
                 outcomes=tuple(
                     MarketOutcomeResponse(outcome_code=outcome_code, odds=odds)

@@ -118,6 +118,8 @@ class MatchMarketView:
 
     market_type: str
     stage: str
+    # 明确赔率时间语义，供界面提示 kickoff_bound 不能用于开球前回测。
+    time_precision: str
     line: float | None
     outcomes: tuple[tuple[str, float], ...]
 

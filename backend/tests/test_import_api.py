@@ -252,6 +252,7 @@ def test_matches_endpoint_returns_stable_page_and_trims_optional_filters() -> No
                         market_type="match_result",
                         stage="closing",
                         line=None,
+                        time_precision="kickoff_bound",
                         outcomes=(("home", 1.5), ("draw", 3.6), ("away", 6.0)),
                     ),
                 ),
@@ -284,7 +285,19 @@ def test_matches_endpoint_returns_stable_page_and_trims_optional_filters() -> No
         "half_time_away_score": 0,
         "home_score": 2,
         "away_score": 1,
-        "markets": response.json()["items"][0]["markets"],
+        "markets": [
+            {
+                "market_type": "match_result",
+                "stage": "closing",
+                "line": None,
+                "time_precision": "kickoff_bound",
+                "outcomes": [
+                    {"outcome_code": "home", "odds": 1.5},
+                    {"outcome_code": "draw", "odds": 3.6},
+                    {"outcome_code": "away", "odds": 6.0},
+                ],
+            }
+        ],
     }
     assert repository.match_queries == [
         MatchQuery(page=1, page_size=20, competition="E0", season="2324", team="Arsenal")
