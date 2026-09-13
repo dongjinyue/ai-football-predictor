@@ -20,6 +20,10 @@ export interface MatchMarket {
   marketType: string
   stage: string
   timePrecision: string
+  source: string
+  provider: string
+  capturedAt: string
+  availableAt: string
   line: number | null
   outcomes: MarketOutcome[]
 }

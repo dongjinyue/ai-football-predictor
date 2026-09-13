@@ -51,6 +51,10 @@ interface MarketResponse {
   market_type: string
   stage: string
   time_precision: string
+  source: string
+  provider: string
+  captured_at: string
+  available_at: string
   line: number | null
   outcomes: OutcomeResponse[]
 }
@@ -120,6 +124,10 @@ function formatMarket(market: MarketResponse): MatchMarket {
     marketType: market.market_type,
     stage: market.stage,
     timePrecision: market.time_precision,
+    source: market.source,
+    provider: market.provider,
+    capturedAt: market.captured_at,
+    availableAt: market.available_at,
     line: market.line,
     outcomes: market.outcomes.map(formatOutcome),
   }

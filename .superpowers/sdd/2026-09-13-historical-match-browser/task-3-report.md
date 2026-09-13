@@ -30,5 +30,11 @@
 
 ## 关注事项
 
-- 当前 Task 2 的 `/api/data/matches` 市场响应只包含市场类型、阶段、时间精度、盘口和结果赔率；客户端类型与之保持一致，未虚构来源、提供方或采集时间字段。若后端后续公开这些字段，需要同步扩展类型和格式化映射。
+- 当前客户端市场类型与 Task 2 的完整响应保持一致，包含来源、提供方、采集时间和可用时间字段；客户端不对这些字段填充默认值。
 - `fetchMatchPage` 和 `fetchDataSummary` 要求调用方显式传入 `AbortSignal`，与页面取消过期请求的设计一致。
+
+## 修复轮次：补齐赔率市场元数据（2026-09-13）
+
+上游 Task 2 新增了 `source`、`provider`、`captured_at` 和 `available_at`。本轮先在已有比赛响应 fixture（固定测试数据）中加入这四个字段，并断言客户端输出 `source`、`provider`、`capturedAt` 和 `availableAt`；测试先因客户端丢失字段而失败，再补充响应类型、前端 `MatchMarket` 类型和格式化映射后通过。未添加任何缺失值默认值。
+
+本轮验证：定向 API 测试 4 个通过；TypeScript 类型检查和 ESLint 通过。
