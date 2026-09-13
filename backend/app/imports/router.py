@@ -6,7 +6,7 @@ import logging
 from datetime import date, datetime
 from typing import Literal, Protocol
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.imports.catalog import (
@@ -16,7 +16,15 @@ from app.imports.catalog import (
     SPLIT_YEAR,
     build_default_requests,
 )
-from app.imports.models import ImportRequestScope, ImportRunAudit, ImportRunResult, SourceFile
+from app.imports.models import (
+    HistoricalMatchView,
+    ImportRequestScope,
+    ImportRunAudit,
+    ImportRunResult,
+    MatchPage,
+    MatchQuery,
+    SourceFile,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -31,6 +39,8 @@ class _ImportRepository(Protocol):
     def latest_run(self) -> ImportRunAudit | None: ...
 
     def data_summary(self) -> dict[str, object]: ...
+
+    def list_matches(self, query: MatchQuery) -> MatchPage: ...
 
 
 class ImportRequest(BaseModel):
@@ -81,6 +91,57 @@ class DataSummaryResponse(BaseModel):
     latest_successful_import_at: str | None
 
 
+class MarketOutcomeResponse(BaseModel):
+    """一个市场结果及其十进制赔率。"""
+
+    outcome_code: str
+    odds: float
+
+
+class MatchMarketResponse(BaseModel):
+    """比赛列表中可安全展示的 closing（收盘）赔率市场。"""
+
+    market_type: str
+    stage: str
+    line: float | None
+    outcomes: tuple[MarketOutcomeResponse, ...]
+
+
+class HistoricalMatchResponse(BaseModel):
+    """历史比赛浏览器所需的稳定比赛字段。"""
+
+    id: str
+    competition_code: str
+    competition_name: str
+    season: str
+    kickoff_at: datetime
+    home_team: str
+    away_team: str
+    half_time_home_score: int | None
+    half_time_away_score: int | None
+    home_score: int | None
+    away_score: int | None
+    markets: tuple[MatchMarketResponse, ...]
+
+
+class FilterOptionResponse(BaseModel):
+    """当前数据库可用的来源联赛代码和赛季筛选项。"""
+
+    competitions: tuple[str, ...]
+    seasons: tuple[str, ...]
+
+
+class MatchPageResponse(BaseModel):
+    """历史比赛的分页 HTTP（超文本传输协议）响应。"""
+
+    page: int
+    page_size: int
+    total_items: int
+    total_pages: int
+    filters: FilterOptionResponse
+    items: tuple[HistoricalMatchResponse, ...]
+
+
 def create_import_router(
     service: _ImportService | None = None,
     repository: _ImportRepository | None = None,
@@ -125,6 +186,33 @@ def create_import_router(
             logger.exception("读取历史数据摘要失败")
             raise HTTPException(status_code=500, detail="internal_error") from None
 
+    @router.get("/matches", response_model=MatchPageResponse)
+    def list_matches(
+        request: Request,
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=20, ge=1, le=100),
+        competition: str | None = None,
+        season: str | None = None,
+        team: str | None = None,
+    ) -> MatchPageResponse:
+        """按安全分页与规范化筛选读取历史比赛，不暴露底层数据库异常。"""
+        query = MatchQuery(
+            page=page,
+            page_size=page_size,
+            competition=_optional_filter(competition),
+            season=_optional_filter(season),
+            team=_optional_filter(team),
+        )
+        try:
+            resolved_repository = (
+                repository if repository is not None else request.app.state.import_repository
+            )
+            result = resolved_repository.list_matches(query)
+        except Exception:
+            logger.exception("读取历史比赛分页失败")
+            raise HTTPException(status_code=500, detail="internal_error") from None
+        return _match_page_response(result, page_size=query.page_size)
+
     return router
 
 
@@ -151,6 +239,55 @@ def _latest_run_response(audit: ImportRunAudit) -> LatestImportRunResponse:
         requested_scope=tuple(
             RequestedScopeResponse(competition_code=item.competition_code, season=item.season)
             for item in audit.requested_scope
+        ),
+    )
+
+
+def _optional_filter(value: str | None) -> str | None:
+    """去除筛选条件首尾空格；空字符串统一表示未筛选。"""
+    return value.strip() or None if value is not None else None
+
+
+def _match_page_response(page: MatchPage, page_size: int) -> MatchPageResponse:
+    """将冻结仓储视图映射为不会泄露数据库行对象的 HTTP 响应。"""
+    return MatchPageResponse(
+        page=page.page,
+        page_size=page_size,
+        total_items=page.total_items,
+        total_pages=page.total_pages,
+        filters=FilterOptionResponse(
+            competitions=page.filters.competitions,
+            seasons=page.filters.seasons,
+        ),
+        items=tuple(_historical_match_response(item) for item in page.items),
+    )
+
+
+def _historical_match_response(match: HistoricalMatchView) -> HistoricalMatchResponse:
+    """显式公开比赛与赔率字段，避免依赖 Pydantic 的隐式对象转换。"""
+    return HistoricalMatchResponse(
+        id=match.id,
+        competition_code=match.competition_code,
+        competition_name=match.competition_name,
+        season=match.season,
+        kickoff_at=match.kickoff_at,
+        home_team=match.home_team,
+        away_team=match.away_team,
+        half_time_home_score=match.half_time_home_score,
+        half_time_away_score=match.half_time_away_score,
+        home_score=match.home_score,
+        away_score=match.away_score,
+        markets=tuple(
+            MatchMarketResponse(
+                market_type=market.market_type,
+                stage=market.stage,
+                line=market.line,
+                outcomes=tuple(
+                    MarketOutcomeResponse(outcome_code=outcome_code, odds=odds)
+                    for outcome_code, odds in market.outcomes
+                ),
+            )
+            for market in match.markets
         ),
     )
 

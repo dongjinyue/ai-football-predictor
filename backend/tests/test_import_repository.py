@@ -107,6 +107,10 @@ def test_list_matches_returns_latest_page_with_closing_market_views(
     assert page.total_pages == 2
     assert len(page.items) == 1
     assert page.items[0].kickoff_at > second_page.items[0].kickoff_at
+    assert page.items[0].competition_code == "E0"
+    assert page.items[0].competition_name == "English Premier League"
+    assert page.items[0].half_time_home_score == 0
+    assert page.items[0].half_time_away_score == 2
     assert {market.market_type for market in page.items[0].markets} == {
         "match_result",
         "over_under_2_5",

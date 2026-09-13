@@ -361,8 +361,10 @@ class ImportRepository:
             match_rows = connection.execute(
                 f"""
                 SELECT
-                    match.id, CAST(match.kickoff_at AS VARCHAR), competition.name_zh, match.season,
-                    home.name_zh, away.name_zh, match.home_score, match.away_score
+                    match.id, CAST(match.kickoff_at AS VARCHAR), competition.source_competition_id,
+                    competition.name_zh, match.season, home.name_zh, away.name_zh,
+                    match.half_time_home_score, match.half_time_away_score, match.home_score,
+                    match.away_score
                 FROM matches AS match
                 JOIN competitions AS competition ON competition.id = match.competition_id
                 JOIN teams AS home ON home.id = match.home_team_id
@@ -400,12 +402,16 @@ class ImportRepository:
                 id=row[0],
                 # DuckDB 在精简环境转换 TIMESTAMPTZ 时依赖可选 pytz（时区库）。
                 kickoff_at=_parse_database_timestamp(row[1]),
-                competition=row[2],
-                season=row[3],
-                home_team=row[4],
-                away_team=row[5],
-                home_score=row[6],
-                away_score=row[7],
+                competition_code=row[2],
+                competition_name=row[3],
+                competition=row[3],
+                season=row[4],
+                home_team=row[5],
+                away_team=row[6],
+                half_time_home_score=row[7],
+                half_time_away_score=row[8],
+                home_score=row[9],
+                away_score=row[10],
                 markets=markets_by_match.get(row[0], ()),
             )
             for row in match_rows

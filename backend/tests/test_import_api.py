@@ -1,12 +1,13 @@
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.imports.models import ImportRequestScope, ImportRunAudit, ImportRunResult
+from app.imports.models import ImportRequestScope, ImportRunAudit, ImportRunResult, MatchQuery
 from app.imports.router import create_import_router
 from app.main import create_app
 
@@ -29,8 +30,22 @@ class FakeImportService:
 class FakeRepository:
     """为 API 提供稳定的只读摘要，避免测试接触真实 DuckDB。"""
 
-    def __init__(self, latest: ImportRunAudit | None = None) -> None:
+    def __init__(
+        self,
+        latest: ImportRunAudit | None = None,
+        matches: object | None = None,
+        error: Exception | None = None,
+    ) -> None:
         self._latest = latest
+        self._matches = matches or SimpleNamespace(
+            page=1,
+            total_items=0,
+            total_pages=0,
+            filters=SimpleNamespace(competitions=(), seasons=()),
+            items=(),
+        )
+        self._error = error
+        self.match_queries = []
 
     def latest_run(self) -> ImportRunAudit | None:
         return self._latest
@@ -45,6 +60,12 @@ class FakeRepository:
             "latest_kickoff_at": "2024-05-19 15:00:00+00",
             "latest_successful_import_at": "2026-09-12 10:00:00+00",
         }
+
+    def list_matches(self, query):
+        self.match_queries.append(query)
+        if self._error:
+            raise self._error
+        return self._matches
 
 
 def build_client(service: FakeImportService | None = None, repository: FakeRepository | None = None) -> TestClient:
@@ -204,6 +225,92 @@ def test_summary_endpoint_returns_repository_counts_and_timestamps() -> None:
     assert response.status_code == 200
     assert response.json()["matches"] == 2
     assert response.json()["market_outcomes"] == 8
+
+
+def test_matches_endpoint_returns_stable_page_and_trims_optional_filters() -> None:
+    """路由向浏览器公开稳定字段，并将空白筛选规范为未筛选。"""
+    page = SimpleNamespace(
+        page=1,
+        total_items=1,
+        total_pages=1,
+        filters=SimpleNamespace(competitions=("E0",), seasons=("2324",)),
+        items=(
+            SimpleNamespace(
+                id="match-1",
+                competition_code="E0",
+                competition_name="English Premier League",
+                season="2324",
+                kickoff_at=datetime(2024, 5, 19, 15, tzinfo=timezone.utc),
+                home_team="Arsenal",
+                away_team="Everton",
+                half_time_home_score=1,
+                half_time_away_score=0,
+                home_score=2,
+                away_score=1,
+                markets=(
+                    SimpleNamespace(
+                        market_type="match_result",
+                        stage="closing",
+                        line=None,
+                        outcomes=(("home", 1.5), ("draw", 3.6), ("away", 6.0)),
+                    ),
+                ),
+            ),
+        ),
+    )
+    repository = FakeRepository(matches=page)
+
+    response = build_client(repository=repository).get(
+        "/api/data/matches",
+        params={
+            "page": 1,
+            "page_size": 20,
+            "competition": " E0 ",
+            "season": " 2324 ",
+            "team": " Arsenal ",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["items"][0] == {
+        "id": "match-1",
+        "competition_code": "E0",
+        "competition_name": "English Premier League",
+        "season": "2324",
+        "kickoff_at": "2024-05-19T15:00:00Z",
+        "home_team": "Arsenal",
+        "away_team": "Everton",
+        "half_time_home_score": 1,
+        "half_time_away_score": 0,
+        "home_score": 2,
+        "away_score": 1,
+        "markets": response.json()["items"][0]["markets"],
+    }
+    assert repository.match_queries == [
+        MatchQuery(page=1, page_size=20, competition="E0", season="2324", team="Arsenal")
+    ]
+
+
+@pytest.mark.parametrize("params", [{"page": 0}, {"page_size": 101}])
+def test_matches_endpoint_rejects_invalid_pagination(params: dict[str, int]) -> None:
+    """HTTP 边界在访问仓储前拒绝无效分页参数。"""
+    repository = FakeRepository()
+
+    response = build_client(repository=repository).get("/api/data/matches", params=params)
+
+    assert response.status_code == 422
+    assert repository.match_queries == []
+
+
+def test_matches_endpoint_hides_unexpected_repository_error_details() -> None:
+    """数据库异常只能记录在服务端，不能把本机路径发送给浏览器。"""
+    response = build_client(
+        repository=FakeRepository(error=RuntimeError(r"C:\\secret\\history.duckdb: unavailable"))
+    ).get("/api/data/matches")
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "internal_error"}
+    assert "C:\\secret\\history.duckdb" not in response.text
 
 
 def test_create_app_defers_real_import_dependencies_until_lifespan(monkeypatch: pytest.MonkeyPatch) -> None:

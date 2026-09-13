@@ -128,10 +128,15 @@ class HistoricalMatchView:
 
     id: str
     kickoff_at: datetime
+    competition_code: str
+    competition_name: str
+    # 保留既有字段，避免仓储调用方在迁移期间中断；新 HTTP API 使用上方明确字段。
     competition: str
     season: str
     home_team: str
     away_team: str
+    half_time_home_score: int | None
+    half_time_away_score: int | None
     home_score: int | None
     away_score: int | None
     markets: tuple[MatchMarketView, ...]
