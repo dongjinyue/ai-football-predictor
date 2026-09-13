@@ -9,7 +9,13 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from app.imports.models import MarketRecord, MatchRecord, ParsedFile, SourceFile
+from app.imports.models import (
+    MarketRecord,
+    MatchQuery,
+    MatchRecord,
+    ParsedFile,
+    SourceFile,
+)
 from app.imports.parser import parse_football_data_csv
 from app.imports.repository import ImportRepository, RepositoryError, normalize_alias
 
@@ -65,6 +71,135 @@ def _import_once(
     assert result.status == "completed"
     repository.finish_run(run_id)
     return run_id
+
+
+def _two_match_file(parsed_file: ParsedFile) -> ParsedFile:
+    """生成时间不同的第二场比赛，覆盖查询排序与分页。"""
+    first_match = parsed_file.matches[0]
+    second_kickoff = first_match.kickoff_at + timedelta(days=7)
+    second_match = replace(
+        first_match,
+        row_number=first_match.row_number + 1,
+        source_match_id=f"{first_match.source_match_id}:second",
+        kickoff_at=second_kickoff,
+        home_team="Chelsea",
+        away_team="Liverpool",
+        # kickoff_bound 的 closing 赔率只能在其对应比赛开球时可用。
+        markets=tuple(
+            replace(market, captured_at=second_kickoff, available_at=second_kickoff)
+            for market in first_match.markets
+        ),
+    )
+    return ParsedFile(matches=(first_match, second_match), skipped_rows=0, errors=())
+
+
+def test_list_matches_returns_latest_page_with_closing_market_views(
+    tmp_path: Path, source_file: SourceFile, parsed_file: ParsedFile
+) -> None:
+    """默认查询按开球时间倒序分页，并组合当前页比赛的 closing 赔率。"""
+    repository = ImportRepository(tmp_path / "match-list.duckdb")
+    _import_once(repository, source_file, _two_match_file(parsed_file))
+
+    page = repository.list_matches(MatchQuery(page=1, page_size=1))
+    second_page = repository.list_matches(MatchQuery(page=2, page_size=1))
+
+    assert page.total_items == 2
+    assert page.total_pages == 2
+    assert len(page.items) == 1
+    assert page.items[0].kickoff_at > second_page.items[0].kickoff_at
+    assert {market.market_type for market in page.items[0].markets} == {
+        "match_result",
+        "over_under_2_5",
+        "asian_handicap",
+    }
+    assert all(market.stage == "closing" for market in page.items[0].markets)
+
+
+def test_list_matches_filters_by_competition_season_and_case_insensitive_team(
+    tmp_path: Path, source_file: SourceFile, parsed_file: ParsedFile
+) -> None:
+    """联赛和赛季精确筛选；球队名称则支持大小写无关的包含匹配。"""
+    repository = ImportRepository(tmp_path / "match-filters.duckdb")
+    _import_once(repository, source_file, parsed_file)
+    german_source = replace(
+        source_file,
+        competition_code="D1",
+        competition_name="German Bundesliga",
+        season="2425",
+        url="https://www.football-data.co.uk/mmz4281/2425/D1.csv",
+    )
+    _import_once(repository, german_source, parsed_file)
+
+    competition_page = repository.list_matches(
+        MatchQuery(competition="English Premier League")
+    )
+    season_page = repository.list_matches(MatchQuery(season="2425"))
+    team_page = repository.list_matches(MatchQuery(team="bUrNl"))
+
+    assert [item.competition for item in competition_page.items] == [
+        "English Premier League"
+    ]
+    assert [item.season for item in season_page.items] == ["2425"]
+    assert len(team_page.items) == 2
+
+
+def test_list_matches_returns_empty_page_for_unknown_or_literal_wildcard_filter(
+    tmp_path: Path, source_file: SourceFile, parsed_file: ParsedFile
+) -> None:
+    """不存在的条件与百分号查询均返回空页，百分号不能扩大为通配搜索。"""
+    repository = ImportRepository(tmp_path / "empty-filter.duckdb")
+    _import_once(repository, source_file, parsed_file)
+
+    unknown_page = repository.list_matches(MatchQuery(competition="Unknown League"))
+    percent_page = repository.list_matches(MatchQuery(team="%"))
+
+    assert unknown_page.total_items == 0
+    assert unknown_page.total_pages == 0
+    assert unknown_page.items == ()
+    assert percent_page.items == ()
+
+
+def test_list_matches_keeps_matches_without_odds_and_respects_second_page(
+    tmp_path: Path, source_file: SourceFile, parsed_file: ParsedFile
+) -> None:
+    """没有赔率的比赛仍应出现在分页结果中，markets 使用空元组表达。"""
+    repository = ImportRepository(tmp_path / "no-odds.duckdb")
+    _import_once(repository, source_file, parsed_file)
+    first_match = parsed_file.matches[0]
+    no_odds_match = replace(
+        first_match,
+        row_number=first_match.row_number + 1,
+        source_match_id=f"{first_match.source_match_id}:no-odds",
+        kickoff_at=first_match.kickoff_at + timedelta(days=14),
+        home_team="Newcastle",
+        away_team="Brighton",
+        markets=(),
+    )
+    _import_once(
+        repository,
+        source_file,
+        ParsedFile(matches=(no_odds_match,), skipped_rows=0, errors=()),
+    )
+
+    first_page = repository.list_matches(MatchQuery(page=1, page_size=1))
+    second_page = repository.list_matches(MatchQuery(page=2, page_size=1))
+
+    assert first_page.items[0].home_team == "Newcastle"
+    assert first_page.items[0].markets == ()
+    assert second_page.items[0].home_team != "Newcastle"
+
+
+def test_list_matches_returns_empty_filter_options_for_empty_database(tmp_path: Path) -> None:
+    """空数据库不会伪造可筛选的联赛或赛季。"""
+    repository = ImportRepository(tmp_path / "empty-database.duckdb")
+
+    page = repository.list_matches(MatchQuery())
+
+    assert page.total_items == 0
+    assert page.total_pages == 0
+    assert page.items == ()
+    assert page.filters.competitions == ()
+    assert page.filters.seasons == ()
 
 
 def test_repository_persists_complete_file_and_keeps_repeat_business_data_idempotent(

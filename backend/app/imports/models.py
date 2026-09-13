@@ -99,3 +99,58 @@ class ImportRunAudit:
     started_at: datetime
     finished_at: datetime | None
     requested_scope: tuple[ImportRequestScope, ...]
+
+
+@dataclass(frozen=True)
+class MatchQuery:
+    """历史比赛列表的分页和可选筛选条件。"""
+
+    page: int = 1
+    page_size: int = 20
+    competition: str | None = None
+    season: str | None = None
+    team: str | None = None
+
+
+@dataclass(frozen=True)
+class MatchMarketView:
+    """列表页展示的一个赔率市场；赔率选项不泄露数据库行对象。"""
+
+    market_type: str
+    stage: str
+    line: float | None
+    outcomes: tuple[tuple[str, float], ...]
+
+
+@dataclass(frozen=True)
+class HistoricalMatchView:
+    """历史比赛及其收盘赔率市场的不可变展示视图。"""
+
+    id: str
+    kickoff_at: datetime
+    competition: str
+    season: str
+    home_team: str
+    away_team: str
+    home_score: int | None
+    away_score: int | None
+    markets: tuple[MatchMarketView, ...]
+
+
+@dataclass(frozen=True)
+class MatchFilterOptions:
+    """历史比赛浏览器可选的联赛与赛季，均为稳定排序的文本。"""
+
+    competitions: tuple[str, ...]
+    seasons: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class MatchPage:
+    """一次历史比赛分页查询的完整结果。"""
+
+    page: int
+    total_items: int
+    total_pages: int
+    filters: MatchFilterOptions
+    items: tuple[HistoricalMatchView, ...]

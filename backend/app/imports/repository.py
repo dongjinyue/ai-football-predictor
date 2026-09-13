@@ -12,9 +12,14 @@ import duckdb
 
 from app.imports.models import (
     FileImportResult,
+    HistoricalMatchView,
     ImportRequestScope,
     ImportRunAudit,
     ImportRunResult,
+    MatchFilterOptions,
+    MatchMarketView,
+    MatchPage,
+    MatchQuery,
     ParsedFile,
     SourceFile,
 )
@@ -328,6 +333,85 @@ class ImportRepository:
             ).fetchone()[0]
         return {**counts, "latest_kickoff_at": latest_kickoff, "latest_successful_import_at": latest_success}
 
+    def list_matches(self, query: MatchQuery) -> MatchPage:
+        """按筛选条件分页读取比赛，并批量组合当前页的 closing 赔率。"""
+        if query.page < 1 or query.page_size < 1:
+            raise ValueError("page and page_size must be positive")
+
+        conditions, parameters = _match_filter_sql(query)
+        where_clause = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+        offset = (query.page - 1) * query.page_size
+
+        with self._connect() as connection:
+            total_items = int(
+                connection.execute(
+                    f"""
+                    SELECT COUNT(*)
+                    FROM matches AS match
+                    JOIN competitions AS competition ON competition.id = match.competition_id
+                    JOIN teams AS home ON home.id = match.home_team_id
+                    JOIN teams AS away ON away.id = match.away_team_id
+                    {where_clause}
+                    """,
+                    parameters,
+                ).fetchone()[0]
+            )
+            match_rows = connection.execute(
+                f"""
+                SELECT
+                    match.id, CAST(match.kickoff_at AS VARCHAR), competition.name_zh, match.season,
+                    home.name_zh, away.name_zh, match.home_score, match.away_score
+                FROM matches AS match
+                JOIN competitions AS competition ON competition.id = match.competition_id
+                JOIN teams AS home ON home.id = match.home_team_id
+                JOIN teams AS away ON away.id = match.away_team_id
+                {where_clause}
+                ORDER BY match.kickoff_at DESC, match.id DESC
+                LIMIT ? OFFSET ?
+                """,
+                [*parameters, query.page_size, offset],
+            ).fetchall()
+            filters = MatchFilterOptions(
+                competitions=tuple(
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT name_zh FROM competitions ORDER BY name_zh, id"
+                    ).fetchall()
+                ),
+                seasons=tuple(
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT DISTINCT season FROM matches ORDER BY season"
+                    ).fetchall()
+                ),
+            )
+            markets_by_match = _load_closing_markets(
+                connection, tuple(row[0] for row in match_rows)
+            )
+
+        items = tuple(
+            HistoricalMatchView(
+                id=row[0],
+                # DuckDB 在精简环境转换 TIMESTAMPTZ 时依赖可选 pytz（时区库）。
+                kickoff_at=_parse_database_timestamp(row[1]),
+                competition=row[2],
+                season=row[3],
+                home_team=row[4],
+                away_team=row[5],
+                home_score=row[6],
+                away_score=row[7],
+                markets=markets_by_match.get(row[0], ()),
+            )
+            for row in match_rows
+        )
+        return MatchPage(
+            page=query.page,
+            total_items=total_items,
+            total_pages=(total_items + query.page_size - 1) // query.page_size,
+            filters=filters,
+            items=items,
+        )
+
     def _connect(self) -> duckdb.DuckDBPyConnection:
         return duckdb.connect(str(self.database_path))
 
@@ -506,3 +590,81 @@ def _parse_database_timestamp(value: str) -> datetime:
 def _epoch_milliseconds(value: datetime) -> int:
     """统一 TIMESTAMPTZ 比较口径，避免最小离线环境的时区可选依赖。"""
     return int(value.timestamp() * 1000)
+
+
+def _match_filter_sql(query: MatchQuery) -> tuple[list[str], list[str]]:
+    """构造参数化筛选片段；球队关键词中的 LIKE 元字符按普通文本处理。"""
+    conditions: list[str] = []
+    parameters: list[str] = []
+    if query.competition:
+        conditions.append("competition.name_zh = ?")
+        parameters.append(query.competition)
+    if query.season:
+        conditions.append("match.season = ?")
+        parameters.append(query.season)
+    if query.team:
+        team_pattern = f"%{_escape_like(query.team.lower())}%"
+        conditions.append(
+            "(lower(home.name_zh) LIKE ? ESCAPE '\\' OR lower(away.name_zh) LIKE ? ESCAPE '\\')"
+        )
+        parameters.extend((team_pattern, team_pattern))
+    return conditions, parameters
+
+
+def _escape_like(value: str) -> str:
+    """转义 LIKE 的反斜杠、百分号和下划线，避免用户输入扩展匹配范围。"""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _load_closing_markets(
+    connection: duckdb.DuckDBPyConnection, match_ids: tuple[str, ...]
+) -> dict[str, tuple[MatchMarketView, ...]]:
+    """一次批量查询读取当前页 markets 与 outcomes，避免逐比赛查询。"""
+    if not match_ids:
+        return {}
+    placeholders = ", ".join("?" for _ in match_ids)
+    rows = connection.execute(
+        f"""
+        SELECT
+            snapshot.match_id, snapshot.id, snapshot.market_type, snapshot.stage,
+            snapshot.handicap, outcome.outcome_code, outcome.odds_value
+        FROM market_snapshots AS snapshot
+        LEFT JOIN market_outcomes AS outcome ON outcome.snapshot_id = snapshot.id
+        WHERE snapshot.match_id IN ({placeholders}) AND snapshot.stage = 'closing'
+        ORDER BY snapshot.match_id, snapshot.market_type, snapshot.id, outcome.outcome_code
+        """,
+        list(match_ids),
+    ).fetchall()
+    grouped: dict[str, list[MatchMarketView]] = {}
+    current_snapshot_id: str | None = None
+    current_match_id: str | None = None
+    current_type: str | None = None
+    current_stage: str | None = None
+    current_line: float | None = None
+    current_outcomes: list[tuple[str, float]] = []
+
+    def finish_market() -> None:
+        if current_snapshot_id is None or current_match_id is None or current_type is None or current_stage is None:
+            return
+        grouped.setdefault(current_match_id, []).append(
+            MatchMarketView(
+                market_type=current_type,
+                stage=current_stage,
+                line=current_line,
+                outcomes=tuple(current_outcomes),
+            )
+        )
+
+    for match_id, snapshot_id, market_type, stage, line, outcome_code, odds_value in rows:
+        if snapshot_id != current_snapshot_id:
+            finish_market()
+            current_snapshot_id = snapshot_id
+            current_match_id = match_id
+            current_type = market_type
+            current_stage = stage
+            current_line = float(line) if line is not None else None
+            current_outcomes = []
+        if outcome_code is not None:
+            current_outcomes.append((outcome_code, float(odds_value)))
+    finish_market()
+    return {match_id: tuple(markets) for match_id, markets in grouped.items()}
