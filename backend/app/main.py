@@ -4,6 +4,7 @@ from pathlib import Path
 
 import httpx
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import load_settings
 from app.imports.downloader import FootballDataDownloader
@@ -55,6 +56,14 @@ def create_app(
     application = FastAPI(
         title="AI Football Predictor API",
         lifespan=lifespan,
+    )
+    # Vite 开发服务器与 API 使用不同端口；显式允许本机只读浏览页读取真实数据。
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://127.0.0.1:4173"],
+        allow_credentials=False,
+        allow_methods=["GET"],
+        allow_headers=["*"],
     )
     # 注入的离线依赖可在不进入 lifespan 的 API 测试中直接使用；默认依赖保持空值。
     application.state.import_repository = import_repository
