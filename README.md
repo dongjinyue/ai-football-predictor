@@ -88,6 +88,34 @@ npm run build
 - `npm run lint`：运行 ESLint 代码规范检查。
 - `npm run build`：先进行 TypeScript 类型检查，再生成生产构建。
 
+## 浏览历史比赛
+
+历史比赛页是只读的数据核验页面：它只显示已经写入 DuckDB（嵌入式数据库）的真实比赛和市场记录，**不会**在打开页面时导入数据、生成预测或创建示例比赛。请先启动后端，再启动前端：
+
+```bash
+cd backend
+python -m app
+```
+
+- 这两条命令应在仓库根目录执行；`cd backend` 进入后端工作目录，随后 `python -m app` 启动 FastAPI（后端 API 框架）服务。
+- 默认监听 `http://127.0.0.1:8000`；`API_HOST` 和 `API_PORT` 可在根目录 `.env` 中修改监听地址和端口。
+- 后端按照根目录 `.env` 的 `DATABASE_PATH` 读取数据库。若要查看随工作区准备的演示数据，可设为 `data/processed/historical_demo.duckdb`；不设置时使用默认的 `data/processed/football_predictor.duckdb`。
+
+另开一个终端，并在仓库根目录执行：
+
+```bash
+cd frontend
+npm run dev -- --host 127.0.0.1 --port 4173
+```
+
+- `cd frontend` 进入前端工作目录；`npm run dev` 启动 Vite（前端开发服务器）。
+- `--host 127.0.0.1` 只允许本机访问，`--port 4173` 固定前端端口，便于按下方地址复现验证。
+- `VITE_API_BASE_URL` 是前端请求后端 API（接口）的基础地址，默认值为 `http://127.0.0.1:8000`；后端端口变更时必须同步修改该变量。
+
+两个服务均就绪后，打开 [http://127.0.0.1:4173/#历史比赛](http://127.0.0.1:4173/#历史比赛)。页面默认按开球时间倒序显示 20 场比赛，可按联赛、赛季和球队筛选，并展开查看收盘赔率的来源与时间语义。窄屏请在表格区域横向滚动。
+
+若页面显示“尚未导入历史比赛”，表示当前 `DATABASE_PATH` 指向的数据库没有比赛数据；请先按下方“历史数据导入”说明完成导入，然后刷新页面。不要把空页面当作前端提供了演示数据。
+
 ## 环境变量
 
 复制根目录 `.env.example` 为 `.env` 后填写本机配置。`.env` 已被 Git 忽略，不要把 API Key（接口密钥）或其他秘密提交到仓库。
