@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 import httpx
 import pytest
@@ -21,6 +23,29 @@ CSV_BYTES = (
     b"Date,HomeTeam,AwayTeam,FTHG,FTAG,AvgH,AvgD,AvgA\n"
     b"10/08/2024,Alpha FC,Beta FC,1,0,2.1,3.2,4.0\n"
 )
+
+
+def test_concurrent_downloads_use_independent_temporary_files(tmp_path, source_file, monkeypatch):
+    """两个下载同时完成校验时，不能竞争同一个 .part 文件。"""
+    downloader = FootballDataDownloader(_client(httpx.MockTransport(
+        lambda request: httpx.Response(200, headers={"content-type": "text/csv"}, content=CSV_BYTES)
+    )), tmp_path)
+    staged_files = []
+    barrier = Barrier(2, action=lambda: staged_files.extend(tmp_path.rglob("*.part")))
+    validate = downloader._validate_content
+
+    def synchronized_validate(content, content_type):
+        validate(content, content_type)
+        barrier.wait(timeout=10)
+
+    monkeypatch.setattr(downloader, "_validate_content", synchronized_validate)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(downloader.download, source_file) for _ in range(2)]
+        results = [future.result(timeout=15) for future in futures]
+    assert all(item.content == CSV_BYTES for item in results)
+    assert len(staged_files) == 2
+    assert results[0].path.read_bytes() == CSV_BYTES
+    assert list(tmp_path.rglob("*.part")) == []
 
 
 @pytest.fixture

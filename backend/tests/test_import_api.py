@@ -130,6 +130,19 @@ def test_import_endpoint_empty_request_uses_default_catalog() -> None:
     assert len(service.requests) == 38 * 5
 
 
+@pytest.mark.parametrize("payload", [
+    {"competition_code": ["E0"]},
+    {"source": "other_source"},
+    {"url": "https://example.test/untrusted.csv"},
+])
+def test_import_endpoint_rejects_unknown_fields_without_expanding_scope(payload) -> None:
+    """范围字段拼错必须报错，不能悄悄扩大到默认全量下载。"""
+    service = FakeImportService()
+    response = build_client(service).post("/api/data/import", json=payload)
+    assert response.status_code == 422
+    assert service.requests == ()
+
+
 def test_import_endpoint_rejects_unknown_or_excessive_scope_without_running_service() -> None:
     service = FakeImportService()
     client = build_client(service)
@@ -180,6 +193,15 @@ def test_import_endpoint_hides_unexpected_exception_details() -> None:
 
     assert response.status_code == 500
     assert response.json() == {"detail": "internal_error"}
+
+
+def test_import_endpoint_reports_overlap_as_conflict() -> None:
+    from app.imports.service import ImportServiceError
+    response = build_client(FakeImportService(error=ImportServiceError("import_in_progress"))).post(
+        "/api/data/import", json={"competition_codes": ["E0"], "seasons": ["2324"]}
+    )
+    assert response.status_code == 409
+    assert response.json() == {"detail": "import_in_progress"}
 
 
 def test_latest_endpoint_returns_stable_null_when_no_run_exists() -> None:

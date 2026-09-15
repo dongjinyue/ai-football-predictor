@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 
 import pytest
 
@@ -113,6 +115,32 @@ class _FakeRepository:
 
 def _parser(_: SourceFile, __: bytes) -> ParsedFile:
     return ParsedFile(matches=(), skipped_rows=0, errors=())
+
+
+def test_overlapping_runs_are_rejected_and_lock_is_released() -> None:
+    """两个服务实例的正常重复提交不能同时写入，结束后可以重试。"""
+    from app.imports.service import ImportService, ImportServiceError
+
+    entered, release = Event(), Event()
+
+    def hold_download():
+        entered.set()
+        assert release.wait(10)
+
+    first = ImportService(_FakeDownloader({}, hold_download), _parser, _FakeRepository())
+    second_repository = _FakeRepository()
+    second = ImportService(_FakeDownloader({}), _parser, second_repository)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(first.run, (_source_file("E0"),))
+        assert entered.wait(10)
+        try:
+            with pytest.raises(ImportServiceError, match="import_in_progress"):
+                second.run((_source_file("E0"),))
+            assert second_repository.start_run_calls == []
+        finally:
+            release.set()
+        assert future.result(timeout=10).status == "completed"
+    assert second.run((_source_file("E0"),)).status == "completed"
 
 
 def test_continues_after_middle_file_failure_and_returns_repository_summary() -> None:

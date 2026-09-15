@@ -25,6 +25,7 @@ from app.imports.models import (
     MatchQuery,
     SourceFile,
 )
+from app.imports.service import ImportServiceError
 
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,8 @@ class _ImportRepository(Protocol):
 
 class ImportRequest(BaseModel):
     """客户端可选的精确导入范围；空对象代表默认全量范围。"""
+
+    model_config = ConfigDict(extra="forbid")
 
     competition_codes: list[str] = Field(default_factory=list, max_length=len(COMPETITIONS))
     seasons: list[str] = Field(default_factory=list, max_length=5)
@@ -162,6 +165,10 @@ def create_import_router(
             result = resolved_service.run(requests)
         except HTTPException:
             raise
+        except ImportServiceError as error:
+            if error.code == "import_in_progress":
+                raise HTTPException(status_code=409, detail=error.code) from None
+            raise HTTPException(status_code=422, detail=error.code) from None
         except Exception:
             # 日志保留给服务端诊断；HTTP 响应不能包含路径、原始 CSV 或堆栈。
             logger.exception("历史导入 API 出现未预期异常")

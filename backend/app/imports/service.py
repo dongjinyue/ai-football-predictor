@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from typing import Protocol
+from threading import Lock
 
 from app.imports.downloader import DownloadError
 from app.imports.models import ImportRunResult, ParsedFile, SourceFile
@@ -13,6 +14,8 @@ from app.imports.repository import RepositoryError
 
 
 logger = logging.getLogger(__name__)
+# 本机单进程应用共享一把写入锁；不同服务实例也不能重叠导入。
+_IMPORT_LOCK = Lock()
 
 
 class _Downloader(Protocol):
@@ -65,6 +68,15 @@ class ImportService:
 
     def run(self, requests: tuple[SourceFile, ...]) -> ImportRunResult:
         """运行一次导入，最终结果完全以仓储写入的审计状态为准。"""
+        if not _IMPORT_LOCK.acquire(blocking=False):
+            raise ImportServiceError("import_in_progress")
+        try:
+            return self._run_locked(requests)
+        finally:
+            _IMPORT_LOCK.release()
+
+    def _run_locked(self, requests: tuple[SourceFile, ...]) -> ImportRunResult:
+        """持有写入锁后才创建审计，拒绝的重复提交不会留下半条运行。"""
         if len({request.source for request in requests}) > 1:
             # 一次运行只能归属于一个来源，避免后续审计与 API 摘要误导调用方。
             raise ImportServiceError("mixed_sources")

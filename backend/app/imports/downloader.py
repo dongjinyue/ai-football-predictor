@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
+from uuid import uuid4
 
 import httpx
 
@@ -131,7 +132,7 @@ class FootballDataDownloader:
         self, path: Path, content: bytes, content_type: str | None
     ) -> DownloadedFile:
         path.parent.mkdir(parents=True, exist_ok=True)
-        part_path = path.with_name(f"{path.name}.part")
+        part_path = path.with_name(f"{path.name}.{uuid4().hex}.part")
         try:
             # 先写临时文件并从临时文件读回校验，校验通过前绝不替换正式缓存。
             part_path.write_bytes(content)

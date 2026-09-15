@@ -93,6 +93,39 @@ def _two_match_file(parsed_file: ParsedFile) -> ParsedFile:
     return ParsedFile(matches=(first_match, second_match), skipped_rows=0, errors=())
 
 
+def test_success_audit_failure_rolls_back_business_rows(
+    tmp_path: Path, source_file: SourceFile, parsed_file: ParsedFile, monkeypatch
+) -> None:
+    """业务写完后审计更新失败，也必须回滚所有业务行。"""
+    repository = ImportRepository(tmp_path / "audit-rollback.duckdb")
+    run_id = repository.start_run(source_file.source, 1)
+    file_id = repository.start_file(run_id, source_file)
+    real_connect = repository._connect
+
+    class FaultConnection:
+        def __enter__(self):
+            self.connection = real_connect()
+            return self
+
+        def __exit__(self, *args):
+            self.connection.close()
+
+        def execute(self, sql, *args):
+            if "UPDATE import_files" in sql and "'completed'" in sql:
+                raise duckdb.IOException("injected audit write failure")
+            return self.connection.execute(sql, *args)
+
+    monkeypatch.setattr(repository, "_connect", FaultConnection)
+    with pytest.raises(RepositoryError):
+        repository.import_parsed_file(file_id, source_file, parsed_file)
+    assert _counts(repository.database_path)["matches"] == 0
+    assert _counts(repository.database_path)["teams"] == 0
+    repository.fail_file(file_id, "audit_write_failed")
+    result = repository.finish_run(run_id)
+    assert result.failed_files == 1
+    assert result.imported_matches == 0
+
+
 def test_list_matches_returns_latest_page_with_closing_market_views(
     tmp_path: Path, source_file: SourceFile, parsed_file: ParsedFile
 ) -> None:

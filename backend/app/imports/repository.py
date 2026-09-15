@@ -163,7 +163,7 @@ class ImportRepository:
         source_file: SourceFile,
         parsed_file: ParsedFile,
     ) -> FileImportResult:
-        """原子写入一个文件的业务数据，成功后才在事务外更新审计状态。"""
+        """业务数据和成功审计在同一事务中提交；失败审计由回滚后的调用方保存。"""
         imported_matches = 0
         try:
             with self._connect() as connection:
@@ -175,6 +175,17 @@ class ImportRepository:
                         imported_matches += self._write_match(
                             connection, competition_id, source_file, match
                         )
+                    updated = connection.execute(
+                        """
+                        UPDATE import_files
+                        SET status = 'completed', imported_matches = ?, skipped_rows = ?, error_code = NULL
+                        WHERE id = ? AND status = 'pending'
+                        RETURNING id
+                        """,
+                        [imported_matches, parsed_file.skipped_rows, file_id],
+                    ).fetchone()
+                    if updated is None:
+                        raise RepositoryError("invalid_file_state")
                 except Exception:
                     connection.execute("ROLLBACK")
                     raise
@@ -186,25 +197,6 @@ class ImportRepository:
             raise RepositoryError("database_error") from error
         except (TypeError, ValueError) as error:
             raise RepositoryError("invalid_record") from error
-
-        # 审计不属于上方业务事务；因此文件失败时 fail_file 仍可留下原因。
-        try:
-            with self._connect() as connection:
-                updated = connection.execute(
-                    """
-                    UPDATE import_files
-                    SET status = 'completed', imported_matches = ?, skipped_rows = ?, error_code = NULL
-                    WHERE id = ? AND status = 'pending'
-                    RETURNING id
-                    """,
-                    [imported_matches, parsed_file.skipped_rows, file_id],
-                ).fetchone()
-                if updated is None:
-                    raise RepositoryError("invalid_file_state")
-        except RepositoryError:
-            raise
-        except duckdb.Error as error:
-            raise RepositoryError("audit_write_failed") from error
 
         return FileImportResult(
             file_id=file_id,
