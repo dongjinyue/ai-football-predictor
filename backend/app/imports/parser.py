@@ -3,16 +3,19 @@
 import csv
 import io
 import math
-from datetime import datetime, time, timezone
+from dataclasses import replace
+from datetime import datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from app.imports.models import MarketRecord, MatchRecord, ParsedFile, SourceFile
 
 
 REQUIRED_HEADERS = frozenset({"Date", "HomeTeam", "AwayTeam", "FTHG", "FTAG"})
 BOOKMAKERS = (
-    ("bet365", "B365H", "B365D", "B365A"),
-    ("betway", "BWH", "BWD", "BWA"),
+    ("bet365", "B365CH", "B365CD", "B365CA"),
+    ("bwin", "BWCH", "BWCD", "BWCA"),
 )
+SOURCE_TIMEZONE = ZoneInfo("Europe/London")
 
 
 class SourceFormatError(ValueError):
@@ -129,13 +132,15 @@ def _kickoff_at(row: dict[str, str | None]) -> datetime:
 
     time_value = (row.get("Time") or "").strip()
     if not time_value:
+        # 只有日期时保留数据库需要的占位时刻，并由市场精度字段标明未知。
         kickoff_time = time(12, tzinfo=timezone.utc)
     else:
         try:
             parsed_time = datetime.strptime(time_value, "%H:%M").time()
         except ValueError as error:
             raise _RowError("invalid_kickoff") from error
-        kickoff_time = parsed_time.replace(tzinfo=timezone.utc)
+        # football-data.co.uk 使用英国当地时间；ZoneInfo 会自动处理 GMT/BST。
+        return datetime.combine(date_part, parsed_time, tzinfo=SOURCE_TIMEZONE).astimezone(timezone.utc)
     return datetime.combine(date_part, kickoff_time)
 
 
@@ -150,7 +155,7 @@ def _markets(row: dict[str, str | None], kickoff_at: datetime) -> tuple[MarketRe
         market_type="over_under_2_5",
         line=2.5,
         provider="average",
-        fields=(("over_2_5", "Avg>2.5"), ("under_2_5", "Avg<2.5")),
+        fields=(("over_2_5", "AvgC>2.5"), ("under_2_5", "AvgC<2.5")),
     )
     if over_under is not None:
         markets.append(over_under)
@@ -163,12 +168,12 @@ def _markets(row: dict[str, str | None], kickoff_at: datetime) -> tuple[MarketRe
 def _result_market(
     row: dict[str, str | None], kickoff_at: datetime
 ) -> MarketRecord | None:
-    average_fields = (("home", "AvgH"), ("draw", "AvgD"), ("away", "AvgA"))
+    average_fields = (("home", "AvgCH"), ("draw", "AvgCD"), ("away", "AvgCA"))
     average = _two_or_three_outcome_market(
         row, kickoff_at, "match_result", None, "average", average_fields
     )
     if average is not None:
-        return average
+        return _mark_result_available_after_kickoff(average)
 
     # 平均赔率列只要存在，就代表该文件选择了平均口径；某一行不完整时宁可
     # 缺少市场，也不能以另一提供方的赔率替换，避免同一文件口径悄然变化。
@@ -185,8 +190,17 @@ def _result_market(
             (("home", home), ("draw", draw), ("away", away)),
         )
         if fallback is not None:
-            return fallback
+            return _mark_result_available_after_kickoff(fallback)
     return None
+
+
+def _mark_result_available_after_kickoff(market: MarketRecord) -> MarketRecord:
+    """完赛比分对应的市场只能在开球后可用，避免回测未来信息泄漏。"""
+    return replace(
+        market,
+        available_at=market.captured_at + timedelta(days=1),
+        time_precision="result_after_kickoff",
+    )
 
 
 def _two_outcome_market(
@@ -226,6 +240,7 @@ def _two_or_three_outcome_market(
     outcomes = tuple(
         (outcome, _positive_odds(value), field) for outcome, field, value in values
     )
+    has_source_time = bool((row.get("Time") or "").strip())
     return MarketRecord(
         provider=provider,
         source="football_data",
@@ -233,7 +248,7 @@ def _two_or_three_outcome_market(
         stage="closing",
         captured_at=kickoff_at,
         available_at=kickoff_at,
-        time_precision="kickoff_bound",
+        time_precision="kickoff_bound" if has_source_time else "date_only_unknown",
         line=line,
         outcomes=outcomes,
     )
@@ -242,7 +257,7 @@ def _two_or_three_outcome_market(
 def _asian_handicap_market(
     row: dict[str, str | None], kickoff_at: datetime
 ) -> MarketRecord | None:
-    line_value = (row.get("AHh") or "").strip()
+    line_value = (row.get("AHCh") or "").strip()
     line: float | None = None
     if line_value:
         try:
@@ -257,7 +272,7 @@ def _asian_handicap_market(
         "asian_handicap",
         None,
         "average",
-        (("home", "AvgAHH"), ("away", "AvgAHA")),
+        (("home", "AvgCAHH"), ("away", "AvgCAHA")),
     )
     if odds is None:
         return None
