@@ -401,6 +401,153 @@ h2 {
   margin: 0;
 }
 
+/* 历史查询延续球场绿与细分隔线，让数据而非装饰成为页面主体。 */
+.history-summary {
+  min-height: 180px;
+  padding-top: 24px;
+}
+
+.history-summary-counts {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 18px;
+  margin: 0;
+}
+
+.history-summary-counts dt,
+.history-help,
+.history-update {
+  color: var(--color-muted);
+  font-size: 0.78rem;
+  line-height: 1.7;
+}
+
+.history-summary-counts dd {
+  margin: 6px 0 0;
+  font-family: var(--font-mono);
+  font-size: clamp(1.3rem, 2.2vw, 1.9rem);
+  color: var(--color-pitch);
+}
+
+.history-board {
+  margin-top: 16px;
+  padding: 24px;
+  min-width: 0;
+}
+
+.history-filters {
+  display: grid;
+  grid-template-columns: 1fr 1fr minmax(160px, 1.5fr) auto;
+  align-items: end;
+  gap: 16px;
+}
+
+.history-filters label {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.history-filters select,
+.history-filters input,
+.history-button {
+  min-height: 44px;
+  padding: 9px 12px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-sm);
+  font: inherit;
+  color: var(--color-ink);
+  background: var(--color-surface);
+}
+
+.history-filters select,
+.history-filters input { width: 100%; min-width: 0; }
+.history-filters select { cursor: pointer; }
+.history-filters input { padding-right: 42px; }
+.history-team-field label { margin-bottom: 8px; }
+.history-search-input { position: relative; }
+.history-search-input input::-webkit-search-cancel-button { display: none; }
+.history-button { font-size: 0.8rem; white-space: nowrap; }
+.history-button:not(:disabled), .history-clear-search { cursor: pointer; }
+.history-button:hover:not(:disabled), .history-clear-search:hover { background: var(--color-canvas); border-color: var(--color-pitch); }
+.history-button:active:not(:disabled), .history-clear-search:active { background: var(--color-line); }
+.history-button:disabled { cursor: not-allowed; color: var(--color-muted); background: var(--color-canvas); }
+
+.history-clear-search {
+  position: absolute;
+  right: 2px;
+  top: 2px;
+  width: 40px;
+  height: 40px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--color-pitch);
+  background: var(--color-surface);
+  font-size: 1.35rem;
+}
+
+.history-filters :focus-visible,
+.history-button:focus-visible,
+.history-table-scroll:focus-visible {
+  outline: 3px solid var(--color-pitch);
+  outline-offset: 3px;
+}
+
+.history-table-scroll {
+  max-width: 100%;
+  /* 表格独立拥有滚动区域，切换加载/结果时不会挪动分页控件。 */
+  overflow: auto;
+  height: 560px;
+  scrollbar-gutter: stable;
+  border-block: 1px solid var(--color-line);
+}
+
+.history-table {
+  width: 100%;
+  min-width: 940px;
+  border-collapse: collapse;
+  text-align: left;
+  font-size: 0.78rem;
+}
+
+.history-table th, .history-table td { padding: 16px 12px; border-bottom: 1px solid var(--color-line); }
+.history-table thead { background: var(--color-canvas); }
+.history-table thead th { white-space: nowrap; font-weight: 700; }
+.history-table tbody th { min-width: 230px; font-weight: 600; }
+.history-table td { font-variant-numeric: tabular-nums; }
+.history-table small { display: block; margin-top: 6px; color: var(--color-muted); }
+.history-table time { display: inline-block; min-width: 132px; }
+.history-table .history-table-state { height: 290px; vertical-align: top; padding-top: 56px; white-space: normal; }
+.history-table-state > div { max-width: min(480px, 70vw); }
+.history-table-state h2 { font-size: 1.4rem; }
+.history-table-state p { line-height: 1.7; }
+.history-details-cell { background: var(--color-canvas); }
+.history-details-title { font-size: 1.15rem; margin-bottom: 20px; }
+.history-markets { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; }
+.history-market { min-width: 0; }
+.history-market h3 { margin: 0 0 12px; color: var(--color-pitch); font-size: 1rem; }
+.history-market-outcomes { display: flex; gap: 20px; padding-block: 12px; border-block: 1px solid var(--color-line); }
+.history-market-outcomes dd { margin: 6px 0 0; font-family: var(--font-mono); font-size: 1.1rem; }
+.history-provenance { display: grid; gap: 10px; }
+.history-provenance dt { color: var(--color-muted); }
+.history-provenance dd { margin: 3px 0 0; overflow-wrap: anywhere; }
+.history-warning { color: var(--color-warning); line-height: 1.7; }
+.history-pagination { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px; padding-top: 20px; font-size: 0.8rem; }
+.history-pagination p { margin: 0; }
+.history-pagination > div { display: flex; align-items: center; gap: 12px; }
+
+@media (max-width: 1100px) {
+  .history-filters { grid-template-columns: 1fr 1fr; }
+}
+
+@media (max-width: 640px) {
+  .history-board { padding: 16px; }
+  .history-summary-counts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .history-filters { grid-template-columns: 1fr; }
+}
+
 @media (max-width: 860px) {
   .sidebar {
     position: static;

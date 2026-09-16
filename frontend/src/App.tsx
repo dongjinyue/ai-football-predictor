@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import {
   Activity,
   BarChart3,
@@ -6,12 +7,14 @@ import {
   DatabaseZap,
   ShieldCheck,
 } from 'lucide-react'
+import HistoryPage from './features/history/HistoryPage'
 
 const navigation = [
-  { label: '今日赛事', icon: CalendarDays, current: true },
-  { label: '历史回测', icon: BarChart3, current: false },
-  { label: '数据质量', icon: DatabaseZap, current: false },
-  { label: '模型管理', icon: CircleGauge, current: false },
+  { label: '今日赛事', icon: CalendarDays, ready: true },
+  { label: '历史比赛', icon: CalendarDays, ready: true },
+  { label: '历史回测', icon: BarChart3, ready: false },
+  { label: '数据质量', icon: DatabaseZap, ready: false },
+  { label: '模型管理', icon: CircleGauge, ready: false },
 ]
 
 const foundationItems = [
@@ -21,6 +24,19 @@ const foundationItems = [
 ]
 
 function App() {
+  const [hash, setHash] = useState(window.location.hash)
+  const isHistory = hash === '#历史比赛' || hash === `#${encodeURIComponent('历史比赛')}`
+
+  useEffect(() => {
+    const updateHash = () => setHash(window.location.hash)
+    window.addEventListener('hashchange', updateHash)
+    return () => window.removeEventListener('hashchange', updateHash)
+  }, [])
+
+  useEffect(() => {
+    document.title = `${isHistory ? '历史比赛' : '今日赛事分析'} · 赛前分析台`
+  }, [isHistory])
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -36,16 +52,16 @@ function App() {
         </div>
 
         <nav aria-label="主要导航" className="primary-nav">
-          {navigation.map(({ label, icon: Icon, current }) => (
+          {navigation.map(({ label, icon: Icon, ready }) => (
             <a
-              aria-current={current ? 'page' : undefined}
+              aria-current={label === (isHistory ? '历史比赛' : '今日赛事') ? 'page' : undefined}
               className="nav-link"
               href={`#${label}`}
               key={label}
             >
               <Icon aria-hidden="true" size={19} strokeWidth={1.75} />
               <span>{label}</span>
-              {!current && <span className="coming-soon">待建</span>}
+              {!ready && <span className="coming-soon">待建</span>}
             </a>
           ))}
         </nav>
@@ -57,6 +73,7 @@ function App() {
       </aside>
 
       <main className="main-content">
+        {isHistory ? <HistoryPage /> : <>
         <header className="page-header">
           <div>
             <p className="eyebrow page-index">工作台 / 基础骨架</p>
@@ -109,6 +126,7 @@ function App() {
           </div>
         </section>
 
+        </>}
         <footer className="research-notice">
           <span>研究边界</span>
           <p>本系统仅供分析与研究，不承诺收益，也不提供自动购票功能。</p>

@@ -8,6 +8,9 @@ MIGRATIONS_PATH = Path(__file__).with_name("migrations")
 REQUIRED_TABLES = frozenset(
     {
         "competitions",
+        "import_files",
+        "import_runs",
+        "market_outcomes",
         "market_snapshots",
         "matches",
         "schema_migrations",
