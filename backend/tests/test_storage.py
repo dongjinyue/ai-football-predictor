@@ -4,6 +4,8 @@ import duckdb
 import pytest
 
 from app.storage import get_database_status, initialize_database
+from app.imports.models import MatchQuery
+from app.imports.repository import ImportRepository
 
 
 REQUIRED_TABLES = {
@@ -51,8 +53,47 @@ def test_initialize_database_can_run_twice_without_losing_schema(
     status = get_database_status(database_path)
     assert status.ready is True
     assert status.engine == "duckdb"
-    assert status.schema_version == 4
+    assert status.schema_version == 6
     assert status.table_count == 9
+
+
+@pytest.mark.parametrize("time_precision", ["result_after_kickoff", "date_only_unknown"])
+def test_market_snapshot_accepts_parser_time_precision_values(
+    tmp_path: Path, time_precision: str
+) -> None:
+    database_path = tmp_path / "market-time-precision.duckdb"
+    initialize_database(database_path)
+
+    with duckdb.connect(str(database_path)) as connection:
+        connection.execute(
+            "INSERT INTO competitions (id, name_zh, source, source_competition_id) VALUES ('c', 'League', 'test', 'c')"
+        )
+        connection.execute(
+            "INSERT INTO teams (id, name_zh) VALUES ('h', 'Home'), ('a', 'Away')"
+        )
+        connection.execute(
+            """
+            INSERT INTO matches
+                (id, competition_id, season, kickoff_at, home_team_id, away_team_id,
+                 status, source, source_match_id, available_at)
+            VALUES ('m', 'c', '2526', TIMESTAMPTZ '2026-01-01 12:00:00+00',
+                    'h', 'a', 'finished', 'test', 'm',
+                    TIMESTAMPTZ '2026-01-01 12:00:00+00')
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO market_snapshots
+                (id, match_id, provider, source, market_type, handicap, handicap_key,
+                 home_value, draw_value, away_value, captured_at, available_at,
+                 stage, time_precision)
+            VALUES (?, 'm', 'average', 'football_data', 'match_result', NULL, 'none',
+                    2.0, 3.0, 4.0,
+                    TIMESTAMPTZ '2026-01-01 12:00:00+00',
+                    TIMESTAMPTZ '2026-01-02 12:00:00+00', 'closing', ?)
+            """,
+            [f"snapshot-{time_precision}", time_precision],
+        )
 
 
 def test_initialize_database_upgrades_real_v3_audit_schema_to_v4(
@@ -64,13 +105,38 @@ def test_initialize_database_upgrades_real_v3_audit_schema_to_v4(
     migration_path = Path(__file__).parents[1] / "app" / "migrations" / "003_import_audit.sql"
     with duckdb.connect(str(database_path)) as connection:
         connection.execute(schema_path.read_text(encoding="utf-8"))
+        connection.execute((migration_path.parent / "002_data_timing_and_market_identity.sql").read_text(encoding="utf-8"))
         connection.execute(migration_path.read_text(encoding="utf-8"))
+        connection.execute("INSERT INTO import_runs (id, source, status, requested_files, started_at) VALUES ('r', 'football_data', 'running', 1, CURRENT_TIMESTAMP)")
+        connection.execute("INSERT INTO import_files (id, run_id, source, competition_code, season, source_url, status) VALUES ('f', 'r', 'football_data', 'E0', '2324', 'https://example.test/E0.csv', 'pending')")
 
     initialize_database(database_path)
     initialize_database(database_path)
 
-    assert get_database_status(database_path).schema_version == 4
+    assert get_database_status(database_path).schema_version == 6
     assert column_details(database_path, "import_files")["downloaded_at"] == "TIMESTAMP WITH TIME ZONE"
+    assert "half_time_home_score" in column_details(database_path, "matches")
+    with duckdb.connect(str(database_path)) as connection:
+        assert connection.execute("SELECT status, downloaded_at FROM import_files WHERE id = 'f'").fetchone() == ("pending", None)
+
+
+def test_v2_legacy_odds_remain_readable_after_upgrade(tmp_path):
+    database_path = tmp_path / "real-v2.duckdb"
+    app_path = Path(__file__).parents[1] / "app"
+    with duckdb.connect(str(database_path)) as connection:
+        connection.execute((app_path / "schema.sql").read_text(encoding="utf-8"))
+        connection.execute((app_path / "migrations/002_data_timing_and_market_identity.sql").read_text(encoding="utf-8"))
+        connection.execute("INSERT INTO competitions (id, name_zh, source, source_competition_id) VALUES ('c', 'League', 'legacy_unknown', 'L')")
+        connection.execute("INSERT INTO teams (id, name_zh) VALUES ('h', 'Home'), ('a', 'Away')")
+        connection.execute("INSERT INTO matches (id, competition_id, season, kickoff_at, home_team_id, away_team_id, status, source, source_match_id, available_at) VALUES ('m', 'c', '2324', TIMESTAMPTZ '2024-01-01 15:00:00Z', 'h', 'a', 'finished', 'legacy_unknown', 'm', TIMESTAMPTZ '2024-01-02 15:00:00Z')")
+        connection.execute("INSERT INTO market_snapshots (id, match_id, provider, source, market_type, handicap_key, home_value, draw_value, away_value, captured_at, available_at, stage, time_precision) VALUES ('s', 'm', 'average', 'legacy_unknown', 'match_result', 'none', 2, 3, 4, TIMESTAMPTZ '2024-01-01 15:00:00Z', TIMESTAMPTZ '2024-01-01 15:00:00Z', 'closing', 'kickoff_bound')")
+    repository = ImportRepository(database_path)
+    initialize_database(database_path)
+    market = repository.list_matches(MatchQuery()).items[0].markets[0]
+    assert dict(market.outcomes) == {"home": 2.0, "draw": 3.0, "away": 4.0}
+    assert market.source == "legacy_unknown"
+    with duckdb.connect(str(database_path)) as connection:
+        assert connection.execute("SELECT source_field FROM market_outcomes WHERE outcome_code = 'home'").fetchone() == ("legacy.home_value",)
 
 
 def test_initialize_database_upgrades_v1_schema_without_losing_data(

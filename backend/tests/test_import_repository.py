@@ -150,12 +150,15 @@ def test_list_matches_returns_latest_page_with_closing_market_views(
         "asian_handicap",
     }
     assert all(market.stage == "closing" for market in page.items[0].markets)
-    assert {market.time_precision for market in page.items[0].markets} == {"kickoff_bound"}
+    assert {market.time_precision for market in page.items[0].markets} == {
+        "kickoff_bound",
+        "result_after_kickoff",
+    }
     assert {market.source for market in page.items[0].markets} == {"football_data"}
     assert {market.provider for market in page.items[0].markets} == {"average"}
     assert {
         (market.captured_at, market.available_at) for market in page.items[0].markets
-    } == {(datetime(2023, 8, 18, 20, tzinfo=timezone.utc),) * 2}
+    } == {(datetime(2023, 8, 18, 19, tzinfo=timezone.utc),) * 2}
 
 
 def test_list_matches_filters_by_competition_code_season_and_case_insensitive_team(
@@ -307,7 +310,7 @@ def test_repository_persists_complete_file_and_keeps_repeat_business_data_idempo
     assert float(snapshot[0]) == 1.5
     assert snapshot[1] == snapshot[2]
     assert snapshot[3:] == ("closing", "kickoff_bound")
-    assert match == (0, 2, 1691784000000)
+    assert match == (0, 2, 1691780400000)
 
 
 def test_repository_rolls_back_all_business_rows_and_preserves_failed_audit(
@@ -425,8 +428,11 @@ def test_repository_rejects_kickoff_bound_market_not_tied_to_match_kickoff(
     """kickoff_bound 收盘赔率只能在开球时可用，不能被提前时间绕过回测边界。"""
     repository = ImportRepository(tmp_path / "timing.duckdb")
     match = parsed_file.matches[0]
+    kickoff_bound_market = next(
+        market for market in match.markets if market.time_precision == "kickoff_bound"
+    )
     invalid_market = replace(
-        match.markets[0],
+        kickoff_bound_market,
         captured_at=match.kickoff_at - timedelta(minutes=1),
         available_at=match.kickoff_at - timedelta(minutes=1),
     )
