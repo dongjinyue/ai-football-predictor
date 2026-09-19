@@ -13,7 +13,7 @@ from uuid import uuid4
 import httpx
 
 from app.imports.models import SourceFile
-from app.imports.parser import REQUIRED_HEADERS
+from app.imports.parser import decode_football_data_text, has_supported_headers
 
 
 class DownloadError(RuntimeError):
@@ -167,11 +167,15 @@ class FootballDataDownloader:
             raise DownloadValidationError("invalid_content_type")
 
         try:
-            text = content.decode("utf-8-sig")
-        except UnicodeDecodeError as error:
+            text = decode_football_data_text(content)
+        except ValueError as error:
             raise DownloadValidationError("invalid_encoding") from error
-        headers = set(csv.DictReader(io.StringIO(text)).fieldnames or ())
-        if not REQUIRED_HEADERS <= headers:
+        headers = {
+            field.strip()
+            for field in (csv.DictReader(io.StringIO(text)).fieldnames or ())
+            if field is not None
+        }
+        if not has_supported_headers(headers):
             raise DownloadValidationError("missing_required_headers")
 
     @staticmethod

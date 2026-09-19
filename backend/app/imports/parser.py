@@ -3,6 +3,7 @@
 import csv
 import io
 import math
+import re
 from dataclasses import replace
 from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -11,6 +12,8 @@ from app.imports.models import MarketRecord, MatchRecord, ParsedFile, SourceFile
 
 
 REQUIRED_HEADERS = frozenset({"Date", "HomeTeam", "AwayTeam", "FTHG", "FTAG"})
+LEGACY_TEAM_HEADERS = frozenset({"Date", "HT", "AT", "FTHG", "FTAG"})
+COMBINED_HEADERS = frozenset({"Date", "Season", "Home", "Away", "HG", "AG"})
 BOOKMAKERS = (
     ("bet365", "B365CH", "B365CD", "B365CA"),
     ("bwin", "BWCH", "BWCD", "BWCA"),
@@ -36,21 +39,21 @@ def parse_football_data_csv(source_file: SourceFile, content: bytes) -> ParsedFi
     历史赔率没有可验证的采集时刻，因此可用时间固定绑定开球时间，避免后续
     回测把收盘赔率当作赛前已知信息。
     """
-    try:
-        text = content.decode("utf-8-sig")
-    except UnicodeDecodeError as error:
-        raise SourceFormatError("invalid_encoding") from error
+    text = decode_football_data_text(content)
 
     reader = csv.DictReader(io.StringIO(text))
-    headers = set(reader.fieldnames or ())
-    if not REQUIRED_HEADERS <= headers:
+    headers = {field.strip() for field in (reader.fieldnames or ()) if field is not None}
+    header_mapping = _header_mapping(headers)
+    if header_mapping is None:
         raise SourceFormatError("missing_required_headers")
 
     matches: list[MatchRecord] = []
     errors: list[str] = []
     for row_number, row in enumerate(reader, start=2):
         try:
-            matches.append(_parse_row(source_file, row_number, row))
+            parsed = _parse_row(source_file, row_number, row, header_mapping)
+            if parsed is not None:
+                matches.append(parsed)
         except _RowError as error:
             errors.append(f"row_{row_number}:{error}")
 
@@ -62,15 +65,21 @@ def parse_football_data_csv(source_file: SourceFile, content: bytes) -> ParsedFi
 
 
 def _parse_row(
-    source_file: SourceFile, row_number: int, row: dict[str, str | None]
-) -> MatchRecord:
-    home_team = _required_text(row, "HomeTeam")
-    away_team = _required_text(row, "AwayTeam")
+    source_file: SourceFile,
+    row_number: int,
+    row: dict[str, str | None],
+    header_mapping: dict[str, str],
+) -> MatchRecord | None:
+    match_season = _row_season(source_file, row)
+    if match_season is None:
+        return None
+    home_team = _required_text(row, header_mapping["home"])
+    away_team = _required_text(row, header_mapping["away"])
     if home_team.casefold() == away_team.casefold():
         raise _RowError("home_away_same")
 
-    home_score = _score(row, "FTHG", required=True)
-    away_score = _score(row, "FTAG", required=True)
+    home_score = _score(row, header_mapping["home_score"], required=True)
+    away_score = _score(row, header_mapping["away_score"], required=True)
     half_home = _score(row, "HTHG", required=False)
     half_away = _score(row, "HTAG", required=False)
     if (half_home is None) != (half_away is None):
@@ -84,7 +93,7 @@ def _parse_row(
         row_number=row_number,
         source_match_id=(
             f"{source_file.source}:{source_file.competition_code}:"
-            f"{source_file.season}:{row_number}"
+            f"{match_season}:{row_number}"
         ),
         kickoff_at=kickoff_at,
         home_team=home_team,
@@ -94,7 +103,86 @@ def _parse_row(
         home_score=home_score,
         away_score=away_score,
         markets=markets,
+        season=match_season if source_file.source_scope == "combined" else None,
     )
+
+
+def decode_football_data_text(content: bytes) -> str:
+    """按来源历史实际使用的编码解码 CSV，优先 UTF-8，再兼容西欧旧编码。"""
+    for encoding in ("utf-8-sig", "cp1252", "latin-1"):
+        try:
+            return content.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    raise SourceFormatError("invalid_encoding")
+
+
+def has_supported_headers(headers: set[str]) -> bool:
+    """下载阶段只检查文件契约，不解析具体行。"""
+    return _header_mapping(headers) is not None
+
+
+def _header_mapping(headers: set[str]) -> dict[str, str] | None:
+    if REQUIRED_HEADERS <= headers:
+        return {
+            "home": "HomeTeam",
+            "away": "AwayTeam",
+            "home_score": "FTHG",
+            "away_score": "FTAG",
+        }
+    if LEGACY_TEAM_HEADERS <= headers:
+        return {
+            "home": "HT",
+            "away": "AT",
+            "home_score": "FTHG",
+            "away_score": "FTAG",
+        }
+    if COMBINED_HEADERS <= headers:
+        return {
+            "home": "Home",
+            "away": "Away",
+            "home_score": "HG",
+            "away_score": "AG",
+        }
+    return None
+
+
+def _row_season(source_file: SourceFile, row: dict[str, str | None]) -> str | None:
+    if source_file.source_scope != "combined":
+        return source_file.season
+
+    raw_season = (row.get("Season") or "").strip()
+    season_year = _season_end_year(raw_season)
+    if season_year is None:
+        raise _RowError("invalid_season")
+    if source_file.start_year is not None and season_year < source_file.start_year:
+        return None
+    if source_file.end_year is not None and season_year > source_file.end_year:
+        return None
+    if source_file.season_style == "split_year":
+        start_year = season_year - 1
+        return f"{start_year % 100:02d}{season_year % 100:02d}"
+    return str(season_year)
+
+
+def _season_end_year(value: str) -> int | None:
+    """将 2012、2012/2013、2012/13 等来源写法统一为结束年份。"""
+    if not value:
+        return None
+    years = re.findall(r"\d{2,4}", value)
+    if not years:
+        return None
+    last = years[-1]
+    if len(last) == 4:
+        return int(last)
+    if len(years) >= 2 and len(years[0]) == 4:
+        base = int(years[0]) // 100 * 100
+        candidate = base + int(last)
+        if candidate < int(years[0]):
+            candidate += 100
+        return candidate
+    year = int(last)
+    return 2000 + year if year <= 20 else 1900 + year
 
 
 def _required_text(row: dict[str, str | None], field: str) -> str:

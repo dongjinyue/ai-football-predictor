@@ -6,12 +6,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
-from threading import Event
+from threading import Event, Lock
 
 import pytest
 
 from app.imports.downloader import DownloadError, DownloadedFile
-from app.imports.models import FileImportResult, ImportRunResult, ParsedFile, SourceFile
+from app.imports.models import FileImportResult, ImportProgress, ImportRunResult, ParsedFile, SourceFile
 from app.imports.repository import RepositoryError
 
 
@@ -235,3 +235,44 @@ def test_unknown_exception_is_logged_and_exposed_only_as_unexpected_error(caplog
     assert secret_path not in ",".join(result.errors)
     assert "unexpected_error" in caplog.text
     assert secret_path in caplog.text
+
+
+def test_progress_callback_receives_completed_file_counts() -> None:
+    """页面进度必须在每个文件结束后更新，而不是等整批任务结束才有数据。"""
+    from app.imports.service import ImportService
+
+    progress: list[ImportProgress] = []
+    result = ImportService(_FakeDownloader({}), _parser, _FakeRepository()).run(
+        (_source_file("E0"), _source_file("E1")),
+        progress=progress.append,
+    )
+
+    assert result.status == "completed"
+    assert [item.completed_files for item in progress] == [1, 2]
+    assert [item.current_competition_code for item in progress] == ["E0", "E1"]
+
+
+def test_downloads_multiple_files_concurrently_before_serial_import() -> None:
+    """批量导入应并发下载文件，同时保持后续数据库写入顺序。"""
+    from app.imports.service import ImportService
+
+    started = Event()
+    release = Event()
+    state = {"count": 0}
+    lock = Lock()
+
+    def before_download() -> None:
+        with lock:
+            state["count"] += 1
+            if state["count"] == 2:
+                started.set()
+        assert release.wait(3)
+
+    service = ImportService(_FakeDownloader({}, before_download), _parser, _FakeRepository())
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(service.run, (_source_file("E0"), _source_file("E1")))
+        try:
+            assert started.wait(1), "两个文件没有同时进入下载阶段"
+        finally:
+            release.set()
+        assert future.result(timeout=5).status == "completed"

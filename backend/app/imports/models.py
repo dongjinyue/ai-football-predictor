@@ -14,6 +14,10 @@ class SourceFile:
     country_code: str
     season: str
     url: str
+    source_scope: str = "seasonal"
+    start_year: int | None = None
+    end_year: int | None = None
+    season_style: str | None = None
 
 
 @dataclass(frozen=True)
@@ -45,6 +49,8 @@ class MatchRecord:
     home_score: int
     away_score: int
     markets: tuple[MarketRecord, ...]
+    # 合并源文件必须保留每一行自己的数据库赛季；普通文件为空时由来源文件补足。
+    season: str | None = None
 
 
 @dataclass(frozen=True)
@@ -83,6 +89,18 @@ class ImportRunResult:
 
 
 @dataclass(frozen=True)
+class ImportProgress:
+    """导入任务对页面公开的单文件进度；不携带本机路径或异常原文。"""
+
+    completed_files: int
+    failed_files: int
+    imported_matches: int
+    skipped_rows: int
+    current_competition_code: str | None = None
+    current_season: str | None = None
+
+
+@dataclass(frozen=True)
 class ImportRequestScope:
     """最近一次导入中一个经审计的联赛赛季请求范围。"""
 
@@ -99,6 +117,73 @@ class ImportRunAudit:
     started_at: datetime
     finished_at: datetime | None
     requested_scope: tuple[ImportRequestScope, ...]
+
+
+@dataclass(frozen=True)
+class DataAuditMarketCoverage:
+    """一个联赛赛季中单类市场的覆盖与时间语义统计。"""
+
+    market_type: str
+    snapshot_count: int
+    match_count: int
+    pre_match_snapshot_count: int
+    pre_match_match_count: int
+    kickoff_bound_snapshot_count: int
+    kickoff_bound_match_count: int
+    post_kickoff_snapshot_count: int
+
+
+@dataclass(frozen=True)
+class DataAuditScope:
+    """一个经请求的联赛赛季的赛果、派生字段和盘口审计结果。"""
+
+    competition_code: str
+    competition_name: str
+    country_code: str
+    season: str
+    match_count: int
+    complete_full_time_matches: int
+    complete_half_time_matches: int
+    missing_half_time_matches: int
+    half_time_result_matches: int
+    total_goals_matches: int
+    label_ready_matches: int
+    pre_match_market_matches: int
+    kickoff_bound_market_matches: int
+    post_kickoff_market_matches: int
+    markets: tuple[DataAuditMarketCoverage, ...]
+
+
+@dataclass(frozen=True)
+class DataAuditSummary:
+    """训练前审计的全局汇总；赔率时间口径单独统计，避免数据泄漏。"""
+
+    catalog_competitions: int
+    imported_competitions: int
+    requested_files: int
+    files_with_matches: int
+    missing_files: int
+    total_matches: int
+    complete_full_time_matches: int
+    complete_half_time_matches: int
+    missing_half_time_matches: int
+    half_time_result_matches: int
+    total_goals_matches: int
+    label_ready_matches: int
+    pre_match_market_matches: int
+    kickoff_bound_market_matches: int
+    post_kickoff_market_matches: int
+
+
+@dataclass(frozen=True)
+class DataAuditReport:
+    """一个时间范围内全部请求联赛赛季的训练前审计报告。"""
+
+    start_year: int
+    end_year: int
+    requested_files: int
+    summary: DataAuditSummary
+    scopes: tuple[DataAuditScope, ...]
 
 
 @dataclass(frozen=True)

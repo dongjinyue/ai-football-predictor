@@ -313,6 +313,57 @@ def test_repository_persists_complete_file_and_keeps_repeat_business_data_idempo
     assert match == (0, 2, 1691780400000)
 
 
+def test_repository_imports_multi_match_files_through_bulk_persistence(
+    tmp_path: Path,
+    source_file: SourceFile,
+    parsed_file: ParsedFile,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """多场比赛文件不能退回逐场执行大量 DuckDB 查询的慢路径。"""
+    repository = ImportRepository(tmp_path / "bulk-history.duckdb")
+
+    def fail_row_by_row(*_args, **_kwargs):
+        raise AssertionError("multi-match import used row-by-row persistence")
+
+    monkeypatch.setattr(repository, "_write_match", fail_row_by_row)
+
+    result = _import_once(repository, source_file, _two_match_file(parsed_file))
+
+    assert result
+    assert _counts(repository.database_path)["matches"] == 2
+
+
+def test_repository_bulk_persistence_uses_set_based_inserts(
+    tmp_path: Path,
+    source_file: SourceFile,
+    parsed_file: ParsedFile,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """批量持久化不能依赖 DuckDB 的逐行 executemany 实现。"""
+    repository = ImportRepository(tmp_path / "set-based-history.duckdb")
+    real_connect = repository._connect
+
+    class ExecuteOnlyConnection:
+        def __enter__(self):
+            self.connection = real_connect()
+            return self
+
+        def __exit__(self, *args):
+            self.connection.close()
+
+        def execute(self, sql, *args):
+            return self.connection.execute(sql, *args)
+
+        def executemany(self, *_args, **_kwargs):
+            raise AssertionError("bulk persistence used row-wise executemany")
+
+    monkeypatch.setattr(repository, "_connect", ExecuteOnlyConnection)
+
+    result = _import_once(repository, source_file, parsed_file)
+
+    assert result
+
+
 def test_repository_rolls_back_all_business_rows_and_preserves_failed_audit(
     tmp_path: Path, source_file: SourceFile
 ) -> None:
@@ -372,6 +423,34 @@ def test_repository_rolls_back_all_business_rows_and_preserves_failed_audit(
         assert connection.execute(
             "SELECT status, error_code FROM import_files WHERE id = ?", [file_id]
         ).fetchone() == ("failed", "database_error")
+
+
+def test_repository_persists_season_from_combined_source_match(tmp_path: Path) -> None:
+    """合并文件中的每场比赛必须按行赛季写入，而不是整份文件共用范围标签。"""
+    source_file = SourceFile(
+        source="football_data",
+        competition_code="ARG",
+        competition_name="Argentine Primera Division",
+        country_code="ARG",
+        season="2000-2020",
+        url="https://football-data.co.uk/new/ARG.csv",
+        source_scope="combined",
+        start_year=2012,
+        end_year=2020,
+        season_style="calendar_year",
+    )
+    content = (
+        "Country,League,Season,Date,Time,Home,Away,HG,AG,Res,AvgCH,AvgCD,AvgCA\n"
+        "Argentina,Liga,2014,01/05/2014,15:00,Home,Visitor,1,0,H,2,3,4\n"
+    ).encode()
+    repository = ImportRepository(tmp_path / "combined.duckdb")
+    parsed = parse_football_data_csv(source_file, content)
+
+    _import_once(repository, source_file, parsed)
+
+    page = repository.list_matches(MatchQuery(season="2014"))
+    assert page.total_items == 1
+    assert page.items[0].season == "2014"
 
 
 def test_finish_run_rejects_incomplete_requested_scope_and_keeps_audit_running(

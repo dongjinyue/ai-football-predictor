@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import load_settings
 from app.imports.downloader import FootballDataDownloader
+from app.imports.jobs import ImportJobManager
 from app.imports.parser import parse_football_data_csv
 from app.imports.repository import ImportRepository
 from app.imports.router import create_import_router
@@ -26,6 +27,7 @@ def create_app(
     database_path: Path | None = None,
     import_service: ImportService | None = None,
     import_repository: ImportRepository | None = None,
+    import_job_manager: ImportJobManager | None = None,
 ) -> FastAPI:
     resolved_database_path = resolve_database_path(database_path)
 
@@ -33,6 +35,8 @@ def create_app(
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         """只在应用启动后创建默认依赖，并在任意启动异常时释放连接池。"""
         http_client: httpx.Client | None = None
+        created_job_manager = False
+        job_manager = import_job_manager
         try:
             # fake（替身）服务不触发真实数据库或网络依赖的构造。
             if import_service is None:
@@ -46,10 +50,16 @@ def create_app(
                 settings = load_settings()
                 downloader = FootballDataDownloader(http_client, settings.football_data_raw_path)
                 service = ImportService(downloader, parse_football_data_csv, repository)
+            if job_manager is None:
+                job_manager = ImportJobManager(service)
+                created_job_manager = True
             application.state.import_repository = repository
             application.state.import_service = service
+            application.state.import_job_manager = job_manager
             yield
         finally:
+            if created_job_manager and job_manager is not None:
+                job_manager.shutdown()
             if http_client is not None:
                 http_client.close()
 
@@ -57,17 +67,22 @@ def create_app(
         title="AI Football Predictor API",
         lifespan=lifespan,
     )
-    # Vite 开发服务器与 API 使用不同端口；显式允许本机只读浏览页读取真实数据。
+    # 本地开发和预览使用不同端口，且浏览器将 localhost 与 127.0.0.1 视为不同来源。
     application.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://127.0.0.1:4173"],
+        allow_origins=[
+            f"http://{host}:{port}"
+            for host in ("localhost", "127.0.0.1")
+            for port in (4173, 4174, 5173, 5174)
+        ],
         allow_credentials=False,
-        allow_methods=["GET"],
+        allow_methods=["GET", "POST"],
         allow_headers=["*"],
     )
     # 注入的离线依赖可在不进入 lifespan 的 API 测试中直接使用；默认依赖保持空值。
     application.state.import_repository = import_repository
     application.state.import_service = import_service
+    application.state.import_job_manager = import_job_manager
 
     @application.get("/api/health")
     def health_check() -> dict[str, str]:

@@ -39,9 +39,41 @@ export interface HistoricalMatch {
   awayTeam: string
   halfTimeHomeScore: number | null
   halfTimeAwayScore: number | null
+  halfTimeResult: 'home' | 'draw' | 'away' | null
   homeScore: number | null
   awayScore: number | null
+  fullTimeResult: 'home' | 'draw' | 'away' | null
+  totalGoals: number | null
   markets: MatchMarket[]
+}
+
+export interface ImportCompetition {
+  code: string
+  name: string
+  countryCode: string
+  seasonStyle: 'split_year' | 'calendar_year'
+}
+
+export interface ImportCatalog {
+  competitions: ImportCompetition[]
+  startYear: number
+  endYear: number
+}
+
+export type ImportJobStatus = 'queued' | 'running' | 'completed' | 'completed_with_errors' | 'failed'
+
+export interface ImportJob {
+  jobId: string
+  runId: string | null
+  status: ImportJobStatus
+  requestedFiles: number
+  completedFiles: number
+  failedFiles: number
+  importedMatches: number
+  skippedRows: number
+  errors: string[]
+  currentCompetitionCode: string | null
+  currentSeason: string | null
 }
 
 export interface MatchFilterOptions {
@@ -66,4 +98,59 @@ export interface DataSummary {
   marketOutcomes: number
   latestKickoffAt: string | null
   latestSuccessfulImportAt: string | null
+}
+
+export interface DataAuditMarketCoverage {
+  marketType: string
+  snapshotCount: number
+  matchCount: number
+  preMatchSnapshotCount: number
+  preMatchMatchCount: number
+  kickoffBoundSnapshotCount: number
+  kickoffBoundMatchCount: number
+  postKickoffSnapshotCount: number
+}
+
+export interface DataAuditScope {
+  competitionCode: string
+  competitionName: string
+  countryCode: string
+  season: string
+  matchCount: number
+  completeFullTimeMatches: number
+  completeHalfTimeMatches: number
+  missingHalfTimeMatches: number
+  halfTimeResultMatches: number
+  totalGoalsMatches: number
+  labelReadyMatches: number
+  preMatchMarketMatches: number
+  kickoffBoundMarketMatches: number
+  postKickoffMarketMatches: number
+  markets: DataAuditMarketCoverage[]
+}
+
+export interface DataAuditSummary {
+  catalogCompetitions: number
+  importedCompetitions: number
+  requestedFiles: number
+  filesWithMatches: number
+  missingFiles: number
+  totalMatches: number
+  completeFullTimeMatches: number
+  completeHalfTimeMatches: number
+  missingHalfTimeMatches: number
+  halfTimeResultMatches: number
+  totalGoalsMatches: number
+  labelReadyMatches: number
+  preMatchMarketMatches: number
+  kickoffBoundMarketMatches: number
+  postKickoffMarketMatches: number
+}
+
+export interface DataAuditReport {
+  startYear: number
+  endYear: number
+  requestedFiles: number
+  summary: DataAuditSummary
+  scopes: DataAuditScope[]
 }

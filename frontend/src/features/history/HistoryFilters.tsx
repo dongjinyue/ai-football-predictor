@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { MatchFilterOptions } from './types'
+import { competitionLabel } from './display'
 
 interface HistoryFiltersProps {
   competition: string
@@ -36,7 +37,9 @@ export default function HistoryFilters({ competition, season, team, options, onC
     <label htmlFor="history-competition">联赛
       <select id="history-competition" value={competition} onChange={(event) => onCompetitionChange(event.target.value)}>
         <option value="">全部联赛</option>
-        {[...new Set([...options.competitions, ...(competition ? [competition] : [])])].map((value) => <option key={value} value={value}>{value}</option>)}
+        {[...new Set([...options.competitions, ...(competition ? [competition] : [])])].map((value) => <option key={value} value={value}>
+          {competitionLabel(value)}（{value}）
+        </option>)}
       </select>
     </label>
     <label htmlFor="history-season">赛季

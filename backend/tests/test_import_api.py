@@ -127,7 +127,101 @@ def test_import_endpoint_empty_request_uses_default_catalog() -> None:
     response = build_client(service).post("/api/data/import", json={})
 
     assert response.status_code == 200
-    assert len(service.requests) == 38 * 5
+    assert len(service.requests) == 22 * 5 + 16
+
+
+def test_import_endpoint_keeps_combined_metadata_for_explicit_extra_league_request() -> None:
+    service = FakeImportService()
+
+    response = build_client(service).post(
+        "/api/data/import",
+        json={"competition_codes": ["BRA"], "seasons": ["2021-2025"]},
+    )
+
+    assert response.status_code == 200
+    assert len(service.requests) == 1
+    request = service.requests[0]
+    assert request.source_scope == "combined"
+    assert request.url.endswith("/new/BRA.csv")
+    assert request.start_year == 2021
+    assert request.end_year == 2025
+
+
+def test_import_endpoint_accepts_historical_year_range_for_all_competitions() -> None:
+    service = FakeImportService()
+
+    response = build_client(service).post(
+        "/api/data/import",
+        json={"start_year": 2000, "end_year": 2020},
+    )
+
+    assert response.status_code == 200
+    assert len(service.requests) == 22 * 20 + 16
+    assert service.requests[0].season == "0001"
+    assert service.requests[-1].season == "2000-2020"
+
+
+def test_async_import_endpoint_submits_job_and_exposes_progress() -> None:
+    from app.imports.jobs import ImportJobSnapshot
+
+    service = FakeImportService()
+    submitted: list[tuple] = []
+    snapshot = ImportJobSnapshot(
+        job_id="job-1",
+        run_id=None,
+        status="queued",
+        requested_files=22 * 20 + 16,
+        completed_files=0,
+        failed_files=0,
+        imported_matches=0,
+        skipped_rows=0,
+        errors=(),
+    )
+
+    class FakeJobManager:
+        def submit(self, requests):
+            submitted.append(requests)
+            return snapshot
+
+        def get(self, job_id):
+            return snapshot if job_id == "job-1" else None
+
+    application = FastAPI()
+    application.include_router(
+        create_import_router(service, FakeRepository(), FakeJobManager()),
+        prefix="/api/data",
+    )
+    client = TestClient(application)
+
+    created = client.post(
+        "/api/data/import/jobs",
+        json={"start_year": 2000, "end_year": 2020},
+    )
+    fetched = client.get("/api/data/import/jobs/job-1")
+
+    assert created.status_code == 202
+    assert created.json()["job_id"] == "job-1"
+    assert created.json()["requested_files"] == 22 * 20 + 16
+    assert fetched.status_code == 200
+    assert fetched.json()["status"] == "queued"
+    assert len(submitted) == 1
+    assert len(submitted[0]) == 22 * 20 + 16
+
+
+def test_import_catalog_endpoint_exposes_competitions_and_year_bounds() -> None:
+    response = build_client().get("/api/data/import/catalog")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["competitions"]) == 38
+    assert payload["start_year"] == 2000
+    assert payload["end_year"] == 2020
+    assert payload["competitions"][0] == {
+        "code": "E0",
+        "name": "English Premier League",
+        "country_code": "ENG",
+        "season_style": "split_year",
+    }
 
 
 @pytest.mark.parametrize("payload", [
@@ -309,8 +403,11 @@ def test_matches_endpoint_returns_stable_page_and_trims_optional_filters() -> No
         "away_team": "Everton",
         "half_time_home_score": 1,
         "half_time_away_score": 0,
+        "half_time_result": "home",
         "home_score": 2,
         "away_score": 1,
+        "full_time_result": "home",
+        "total_goals": 3,
         "markets": [
             {
                 "market_type": "match_result",
@@ -332,6 +429,38 @@ def test_matches_endpoint_returns_stable_page_and_trims_optional_filters() -> No
     assert repository.match_queries == [
         MatchQuery(page=1, page_size=20, competition="E0", season="2324", team="Arsenal")
     ]
+
+
+def test_matches_endpoint_returns_unknown_derived_results_when_scores_are_missing() -> None:
+    page = SimpleNamespace(
+        page=1,
+        total_items=1,
+        total_pages=1,
+        filters=SimpleNamespace(competitions=(), seasons=()),
+        items=(
+            SimpleNamespace(
+                id="match-1",
+                competition_code="E0",
+                competition_name="English Premier League",
+                season="2324",
+                kickoff_at=datetime(2024, 5, 19, 15, tzinfo=timezone.utc),
+                home_team="Arsenal",
+                away_team="Everton",
+                half_time_home_score=None,
+                half_time_away_score=None,
+                home_score=None,
+                away_score=None,
+                markets=(),
+            ),
+        ),
+    )
+
+    response = build_client(repository=FakeRepository(matches=page)).get("/api/data/matches")
+
+    assert response.status_code == 200
+    assert response.json()["items"][0]["half_time_result"] is None
+    assert response.json()["items"][0]["full_time_result"] is None
+    assert response.json()["items"][0]["total_goals"] is None
 
 
 @pytest.mark.parametrize("params", [{"page": 0}, {"page_size": 101}])

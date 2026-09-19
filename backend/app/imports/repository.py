@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
+import csv
 import re
+import tempfile
 import unicodedata
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 import duckdb
 
 from app.imports.models import (
+    DataAuditMarketCoverage,
+    DataAuditReport,
+    DataAuditScope,
+    DataAuditSummary,
     FileImportResult,
     HistoricalMatchView,
     ImportRequestScope,
@@ -37,6 +44,46 @@ class RepositoryError(RuntimeError):
     def __init__(self, code: str) -> None:
         self.code = code
         super().__init__(code)
+
+
+@dataclass(frozen=True)
+class _PreparedTeam:
+    """批量写入前整理好的球队与来源别名。"""
+
+    team_id: str
+    alias_id: str
+    source: str
+    alias: str
+    normalized_alias: str
+
+
+@dataclass(frozen=True)
+class _PreparedOutcome:
+    """批量写入前整理好的赔率结果。"""
+
+    outcome_id: str
+    row: tuple[object, ...]
+    facts: tuple[object, ...]
+
+
+@dataclass(frozen=True)
+class _PreparedMarket:
+    """批量写入前整理好的赔率快照及其结果。"""
+
+    snapshot_id: str
+    row: tuple[object, ...]
+    facts: tuple[object, ...]
+    outcomes: tuple[_PreparedOutcome, ...]
+
+
+@dataclass(frozen=True)
+class _PreparedMatch:
+    """批量写入前整理好的比赛与市场关联。"""
+
+    match_id: str
+    row: tuple[object, ...]
+    facts: tuple[object, ...]
+    markets: tuple[_PreparedMarket, ...]
 
 
 def stable_id(kind: str, *parts: str) -> str:
@@ -171,10 +218,9 @@ class ImportRepository:
                 try:
                     self._assert_pending_file(connection, file_id, source_file)
                     competition_id = self._write_competition(connection, source_file)
-                    for match in parsed_file.matches:
-                        imported_matches += self._write_match(
-                            connection, competition_id, source_file, match
-                        )
+                    imported_matches = self._bulk_write_matches(
+                        connection, competition_id, source_file, parsed_file
+                    )
                     updated = connection.execute(
                         """
                         UPDATE import_files
@@ -325,6 +371,194 @@ class ImportRepository:
             ).fetchone()[0]
         return {**counts, "latest_kickoff_at": latest_kickoff, "latest_successful_import_at": latest_success}
 
+    def data_audit(
+        self,
+        requests: tuple[SourceFile, ...],
+        start_year: int,
+        end_year: int,
+    ) -> DataAuditReport:
+        """Aggregate requested competition-season coverage in a small number of scans."""
+        if not requests:
+            empty = DataAuditSummary(
+                catalog_competitions=0,
+                imported_competitions=0,
+                requested_files=0,
+                files_with_matches=0,
+                missing_files=0,
+                total_matches=0,
+                complete_full_time_matches=0,
+                complete_half_time_matches=0,
+                missing_half_time_matches=0,
+                half_time_result_matches=0,
+                total_goals_matches=0,
+                label_ready_matches=0,
+                pre_match_market_matches=0,
+                kickoff_bound_market_matches=0,
+                post_kickoff_market_matches=0,
+            )
+            return DataAuditReport(start_year, end_year, 0, empty, ())
+
+        with self._connect() as connection:
+            match_rows = connection.execute(
+                """
+                SELECT competition.source_competition_id, match.season,
+                       COUNT(*) AS match_count,
+                       COUNT(*) FILTER (
+                           WHERE match.home_score IS NOT NULL AND match.away_score IS NOT NULL
+                       ) AS complete_full_time_matches,
+                       COUNT(*) FILTER (
+                           WHERE match.half_time_home_score IS NOT NULL
+                             AND match.half_time_away_score IS NOT NULL
+                       ) AS complete_half_time_matches,
+                       COUNT(*) FILTER (
+                           WHERE match.half_time_home_score IS NULL
+                              OR match.half_time_away_score IS NULL
+                       ) AS missing_half_time_matches
+                FROM matches AS match
+                JOIN competitions AS competition ON competition.id = match.competition_id
+                GROUP BY competition.source_competition_id, match.season
+                """
+            ).fetchall()
+            market_rows = connection.execute(
+                """
+                SELECT competition.source_competition_id, match.season,
+                       snapshot.market_type,
+                       COUNT(*) AS snapshot_count,
+                       COUNT(DISTINCT snapshot.match_id) AS match_count,
+                       COUNT(*) FILTER (
+                           WHERE snapshot.available_at < match.kickoff_at
+                       ) AS pre_match_snapshot_count,
+                       COUNT(DISTINCT snapshot.match_id) FILTER (
+                           WHERE snapshot.available_at < match.kickoff_at
+                       ) AS pre_match_match_count,
+                       COUNT(*) FILTER (
+                           WHERE snapshot.time_precision = 'kickoff_bound'
+                       ) AS kickoff_bound_snapshot_count,
+                       COUNT(DISTINCT snapshot.match_id) FILTER (
+                           WHERE snapshot.time_precision = 'kickoff_bound'
+                       ) AS kickoff_bound_match_count,
+                       COUNT(*) FILTER (
+                           WHERE snapshot.available_at >= match.kickoff_at
+                       ) AS post_kickoff_snapshot_count
+                FROM market_snapshots AS snapshot
+                JOIN matches AS match ON match.id = snapshot.match_id
+                JOIN competitions AS competition ON competition.id = match.competition_id
+                GROUP BY competition.source_competition_id, match.season, snapshot.market_type
+                ORDER BY competition.source_competition_id, match.season, snapshot.market_type
+                """
+            ).fetchall()
+            market_summary_rows = connection.execute(
+                """
+                SELECT competition.source_competition_id, match.season,
+                       COUNT(DISTINCT snapshot.match_id) FILTER (
+                           WHERE snapshot.available_at < match.kickoff_at
+                       ) AS pre_match_market_matches,
+                       COUNT(DISTINCT snapshot.match_id) FILTER (
+                           WHERE snapshot.time_precision = 'kickoff_bound'
+                       ) AS kickoff_bound_market_matches,
+                       COUNT(DISTINCT snapshot.match_id) FILTER (
+                           WHERE snapshot.available_at >= match.kickoff_at
+                       ) AS post_kickoff_market_matches
+                FROM market_snapshots AS snapshot
+                JOIN matches AS match ON match.id = snapshot.match_id
+                JOIN competitions AS competition ON competition.id = match.competition_id
+                GROUP BY competition.source_competition_id, match.season
+                """
+            ).fetchall()
+
+        matches_by_scope = {
+            (row[0], row[1]): {
+                "match_count": int(row[2]),
+                "complete_full_time_matches": int(row[3]),
+                "complete_half_time_matches": int(row[4]),
+                "missing_half_time_matches": int(row[5]),
+            }
+            for row in match_rows
+        }
+        markets_by_scope: dict[tuple[str, str], list[DataAuditMarketCoverage]] = {}
+        for row in market_rows:
+            key = (row[0], row[1])
+            markets_by_scope.setdefault(key, []).append(
+                DataAuditMarketCoverage(
+                    market_type=row[2],
+                    snapshot_count=int(row[3]),
+                    match_count=int(row[4]),
+                    pre_match_snapshot_count=int(row[5]),
+                    pre_match_match_count=int(row[6]),
+                    kickoff_bound_snapshot_count=int(row[7]),
+                    kickoff_bound_match_count=int(row[8]),
+                    post_kickoff_snapshot_count=int(row[9]),
+                )
+            )
+
+        market_summary_by_scope = {
+            (row[0], row[1]): {
+                "pre_match_market_matches": int(row[2]),
+                "kickoff_bound_market_matches": int(row[3]),
+                "post_kickoff_market_matches": int(row[4]),
+            }
+            for row in market_summary_rows
+        }
+
+        scopes: list[DataAuditScope] = []
+        for source_file in requests:
+            seasons = _audit_seasons(source_file)
+            match_stats = _sum_match_audit_stats(
+                matches_by_scope,
+                source_file.competition_code,
+                seasons,
+            )
+            market_stats = _sum_market_audit_stats(
+                market_summary_by_scope,
+                source_file.competition_code,
+                seasons,
+            )
+            market_coverage = _merge_market_coverage(
+                markets_by_scope,
+                source_file.competition_code,
+                seasons,
+            )
+            complete_full_time = match_stats["complete_full_time_matches"]
+            complete_half_time = match_stats["complete_half_time_matches"]
+            scopes.append(
+                DataAuditScope(
+                    competition_code=source_file.competition_code,
+                    competition_name=source_file.competition_name,
+                    country_code=source_file.country_code,
+                    season=source_file.season,
+                    match_count=match_stats["match_count"],
+                    complete_full_time_matches=complete_full_time,
+                    complete_half_time_matches=complete_half_time,
+                    missing_half_time_matches=match_stats["missing_half_time_matches"],
+                    half_time_result_matches=complete_half_time,
+                    total_goals_matches=complete_full_time,
+                    label_ready_matches=complete_full_time,
+                    **market_stats,
+                    markets=market_coverage,
+                )
+            )
+
+        summary = DataAuditSummary(
+            catalog_competitions=len({item.competition_code for item in requests}),
+            imported_competitions=len({
+                item.competition_code for item in scopes if item.match_count > 0
+            }),
+            requested_files=len(scopes),
+            files_with_matches=sum(item.match_count > 0 for item in scopes),
+            missing_files=sum(item.match_count == 0 for item in scopes),
+            total_matches=sum(item.match_count for item in scopes),
+            complete_full_time_matches=sum(item.complete_full_time_matches for item in scopes),
+            complete_half_time_matches=sum(item.complete_half_time_matches for item in scopes),
+            missing_half_time_matches=sum(item.missing_half_time_matches for item in scopes),
+            half_time_result_matches=sum(item.half_time_result_matches for item in scopes),
+            total_goals_matches=sum(item.total_goals_matches for item in scopes),
+            label_ready_matches=sum(item.label_ready_matches for item in scopes),
+            pre_match_market_matches=sum(item.pre_match_market_matches for item in scopes),
+            kickoff_bound_market_matches=sum(item.kickoff_bound_market_matches for item in scopes),
+            post_kickoff_market_matches=sum(item.post_kickoff_market_matches for item in scopes),
+        )
+        return DataAuditReport(start_year, end_year, len(scopes), summary, tuple(scopes))
+
     def list_matches(self, query: MatchQuery) -> MatchPage:
         """按筛选条件分页读取比赛，并批量组合当前页的 closing 赔率。"""
         if query.page < 1:
@@ -432,6 +666,346 @@ class ImportRepository:
         ):
             raise RepositoryError("invalid_file_state")
 
+    def _bulk_write_matches(
+        self,
+        connection: duckdb.DuckDBPyConnection,
+        competition_id: str,
+        source_file: SourceFile,
+        parsed_file: ParsedFile,
+    ) -> int:
+        """先在内存中整理自然键，再以少量批量语句写入一份文件。
+
+        旧实现每场比赛都要查询球队、别名、比赛、市场和赔率结果，380 场比赛
+        会产生数千次 Python 到 DuckDB 的往返。这里先生成稳定 ID 并一次性校验
+        已有事实，再按外键顺序批量写入，重复导入仍保持幂等和冲突可检测。
+        """
+        teams_by_alias: dict[str, _PreparedTeam] = {}
+        matches_by_id: dict[str, _PreparedMatch] = {}
+        markets_by_id: dict[str, _PreparedMarket] = {}
+        outcomes_by_id: dict[str, _PreparedOutcome] = {}
+
+        def team_id_for(alias: str) -> str:
+            normalized = normalize_alias(alias)
+            if not normalized:
+                raise RepositoryError("invalid_record")
+            prepared = teams_by_alias.get(normalized)
+            if prepared is None:
+                team_id = stable_id("team", source_file.source, normalized)
+                prepared = _PreparedTeam(
+                    team_id=team_id,
+                    alias_id=stable_id("team_alias", source_file.source, normalized),
+                    source=source_file.source,
+                    alias=alias.strip(),
+                    normalized_alias=normalized,
+                )
+                teams_by_alias[normalized] = prepared
+            return prepared.team_id
+
+        for match in parsed_file.matches:
+            kickoff_at = _utc(match.kickoff_at)
+            match_season = match.season or source_file.season
+            home_team_id = team_id_for(match.home_team)
+            away_team_id = team_id_for(match.away_team)
+            natural_identity = ":".join(
+                (
+                    source_file.source,
+                    source_file.competition_code,
+                    match_season,
+                    normalize_alias(match.home_team),
+                    normalize_alias(match.away_team),
+                    kickoff_at.isoformat(),
+                )
+            )
+            match_id = stable_id("match", natural_identity)
+            match_facts = (
+                competition_id,
+                match_season,
+                _epoch_milliseconds(kickoff_at),
+                home_team_id,
+                away_team_id,
+                match.home_score,
+                match.away_score,
+                match.half_time_home_score,
+                match.half_time_away_score,
+                _epoch_milliseconds(kickoff_at),
+            )
+            prepared_markets: list[_PreparedMarket] = []
+            for market in match.markets:
+                prepared_market = self._prepare_market(
+                    match_id,
+                    kickoff_at,
+                    market,
+                    outcomes_by_id,
+                )
+                previous_market = markets_by_id.get(prepared_market.snapshot_id)
+                if previous_market is not None and previous_market.facts != prepared_market.facts:
+                    raise RepositoryError("source_fact_conflict")
+                if previous_market is None:
+                    markets_by_id[prepared_market.snapshot_id] = prepared_market
+                prepared_markets.append(prepared_market)
+
+            prepared_match = _PreparedMatch(
+                match_id=match_id,
+                row=(
+                    match_id,
+                    competition_id,
+                    match_season,
+                    _epoch_milliseconds(kickoff_at),
+                    home_team_id,
+                    away_team_id,
+                    match.home_score,
+                    match.away_score,
+                    match.half_time_home_score,
+                    match.half_time_away_score,
+                    "finished",
+                    source_file.source,
+                    natural_identity,
+                    _epoch_milliseconds(kickoff_at),
+                ),
+                facts=match_facts,
+                markets=tuple(prepared_markets),
+            )
+            previous_match = matches_by_id.get(match_id)
+            if previous_match is not None and previous_match.facts != prepared_match.facts:
+                raise RepositoryError("source_fact_conflict")
+            if previous_match is None:
+                matches_by_id[match_id] = prepared_match
+
+        teams = tuple(teams_by_alias.values())
+        matches = tuple(matches_by_id.values())
+        markets = tuple(markets_by_id.values())
+        outcomes = tuple(outcomes_by_id.values())
+
+        # read_csv（CSV 批量读取）只把每个临时文件绑定一次，避免把数千个业务值
+        # 作为 Python 参数逐个传给 DuckDB。临时文件在事务结束后立即删除。
+        with tempfile.TemporaryDirectory(
+            prefix=".football-import-",
+            dir=str(self.database_path.parent),
+        ) as stage_root:
+            stage_tables = {
+                "teams": _create_stage_table(
+                    connection,
+                    Path(stage_root) / "teams.csv",
+                    "stage_import_teams",
+                    ("team_id", "alias"),
+                    {"team_id": "VARCHAR", "alias": "VARCHAR"},
+                    tuple((team.team_id, team.alias) for team in teams),
+                ),
+                "aliases": _create_stage_table(
+                    connection,
+                    Path(stage_root) / "aliases.csv",
+                    "stage_import_aliases",
+                    ("alias_id", "team_id", "source", "alias", "normalized_alias"),
+                    {
+                        "alias_id": "VARCHAR",
+                        "team_id": "VARCHAR",
+                        "source": "VARCHAR",
+                        "alias": "VARCHAR",
+                        "normalized_alias": "VARCHAR",
+                    },
+                    tuple(
+                        (
+                            team.alias_id,
+                            team.team_id,
+                            team.source,
+                            team.alias,
+                            team.normalized_alias,
+                        )
+                        for team in teams
+                    ),
+                ),
+                "matches": _create_stage_table(
+                    connection,
+                    Path(stage_root) / "matches.csv",
+                    "stage_import_matches",
+                    (
+                        "id",
+                        "competition_id",
+                        "season",
+                        "kickoff_ms",
+                        "home_team_id",
+                        "away_team_id",
+                        "home_score",
+                        "away_score",
+                        "half_time_home_score",
+                        "half_time_away_score",
+                        "status",
+                        "source",
+                        "source_match_id",
+                        "available_ms",
+                    ),
+                    {
+                        "id": "VARCHAR",
+                        "competition_id": "VARCHAR",
+                        "season": "VARCHAR",
+                        "kickoff_ms": "BIGINT",
+                        "home_team_id": "VARCHAR",
+                        "away_team_id": "VARCHAR",
+                        "home_score": "INTEGER",
+                        "away_score": "INTEGER",
+                        "half_time_home_score": "INTEGER",
+                        "half_time_away_score": "INTEGER",
+                        "status": "VARCHAR",
+                        "source": "VARCHAR",
+                        "source_match_id": "VARCHAR",
+                        "available_ms": "BIGINT",
+                    },
+                    tuple(match.row for match in matches),
+                ),
+                "markets": _create_stage_table(
+                    connection,
+                    Path(stage_root) / "markets.csv",
+                    "stage_import_markets",
+                    (
+                        "id",
+                        "match_id",
+                        "provider",
+                        "source",
+                        "market_type",
+                        "handicap",
+                        "handicap_key",
+                        "captured_ms",
+                        "available_ms",
+                        "stage",
+                        "time_precision",
+                    ),
+                    {
+                        "id": "VARCHAR",
+                        "match_id": "VARCHAR",
+                        "provider": "VARCHAR",
+                        "source": "VARCHAR",
+                        "market_type": "VARCHAR",
+                        "handicap": "DOUBLE",
+                        "handicap_key": "VARCHAR",
+                        "captured_ms": "BIGINT",
+                        "available_ms": "BIGINT",
+                        "stage": "VARCHAR",
+                        "time_precision": "VARCHAR",
+                    },
+                    tuple(
+                        (
+                            market.snapshot_id,
+                            market.row[1],
+                            market.row[2],
+                            market.row[3],
+                            market.row[4],
+                            market.row[5],
+                            market.row[6],
+                            _epoch_milliseconds(market.row[7]),
+                            _epoch_milliseconds(market.row[8]),
+                            market.row[9],
+                            market.row[10],
+                        )
+                        for market in markets
+                    ),
+                ),
+                "outcomes": _create_stage_table(
+                    connection,
+                    Path(stage_root) / "outcomes.csv",
+                    "stage_import_outcomes",
+                    ("id", "snapshot_id", "outcome_code", "odds_value", "source_field"),
+                    {
+                        "id": "VARCHAR",
+                        "snapshot_id": "VARCHAR",
+                        "outcome_code": "VARCHAR",
+                        "odds_value": "DOUBLE",
+                        "source_field": "VARCHAR",
+                    },
+                    tuple(outcome.row for outcome in outcomes),
+                ),
+            }
+            try:
+                _validate_staged_facts(connection, stage_tables)
+                existing_matches = int(
+                    connection.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM stage_import_matches AS staged
+                        JOIN matches AS existing ON existing.id = staged.id
+                        """
+                    ).fetchone()[0]
+                )
+                _insert_staged_rows(connection, stage_tables)
+            finally:
+                for table_name in stage_tables.values():
+                    connection.execute(f"DROP TABLE IF EXISTS {table_name}")
+
+        return len(matches) - existing_matches
+
+    @staticmethod
+    def _prepare_market(
+        match_id: str,
+        kickoff_at: datetime,
+        market,
+        outcomes_by_id: dict[str, _PreparedOutcome],
+    ) -> _PreparedMarket:
+        captured_at = _utc(market.captured_at)
+        available_at = _utc(market.available_at)
+        if captured_at > available_at:
+            raise RepositoryError("invalid_record")
+        if market.time_precision == "kickoff_bound" and (
+            market.stage != "closing"
+            or captured_at != kickoff_at
+            or available_at != kickoff_at
+        ):
+            raise RepositoryError("invalid_record")
+
+        handicap_key = "none" if market.line is None else f"{market.line:.2f}"
+        snapshot_id = stable_id(
+            "market_snapshot",
+            match_id,
+            market.source,
+            market.provider,
+            market.market_type,
+            handicap_key,
+            captured_at.isoformat(),
+            market.stage,
+        )
+        snapshot_facts = (
+            match_id,
+            market.provider,
+            market.source,
+            market.market_type,
+            handicap_key,
+            _epoch_milliseconds(captured_at),
+            _epoch_milliseconds(available_at),
+            market.stage,
+            market.time_precision,
+        )
+        outcomes: list[_PreparedOutcome] = []
+        for outcome_code, odds_value, source_field in market.outcomes:
+            outcome_id = stable_id("market_outcome", snapshot_id, outcome_code)
+            prepared_outcome = _PreparedOutcome(
+                outcome_id=outcome_id,
+                row=(outcome_id, snapshot_id, outcome_code, odds_value, source_field),
+                facts=(odds_value, source_field),
+            )
+            previous_outcome = outcomes_by_id.get(outcome_id)
+            if previous_outcome is not None and previous_outcome.facts != prepared_outcome.facts:
+                raise RepositoryError("source_fact_conflict")
+            if previous_outcome is None:
+                outcomes_by_id[outcome_id] = prepared_outcome
+            outcomes.append(prepared_outcome)
+
+        return _PreparedMarket(
+            snapshot_id=snapshot_id,
+            row=(
+                snapshot_id,
+                match_id,
+                market.provider,
+                market.source,
+                market.market_type,
+                market.line,
+                handicap_key,
+                captured_at,
+                available_at,
+                market.stage,
+                market.time_precision,
+            ),
+            facts=snapshot_facts,
+            outcomes=tuple(outcomes),
+        )
+
     @staticmethod
     def _write_competition(connection: duckdb.DuckDBPyConnection, source_file: SourceFile) -> str:
         competition_id = stable_id("competition", source_file.source, source_file.competition_code)
@@ -455,7 +1029,8 @@ class ImportRepository:
         home_id = self._write_team(connection, source_file.source, match.home_team)
         away_id = self._write_team(connection, source_file.source, match.away_team)
         kickoff_at = _utc(match.kickoff_at)
-        natural_identity = ":".join((source_file.source, source_file.competition_code, source_file.season, normalize_alias(match.home_team), normalize_alias(match.away_team), kickoff_at.isoformat()))
+        match_season = match.season or source_file.season
+        natural_identity = ":".join((source_file.source, source_file.competition_code, match_season, normalize_alias(match.home_team), normalize_alias(match.away_team), kickoff_at.isoformat()))
         match_id = stable_id("match", natural_identity)
         existing = connection.execute(
             """
@@ -466,7 +1041,7 @@ class ImportRepository:
             """,
             [match_id],
         ).fetchone()
-        facts = (competition_id, source_file.season, kickoff_at, home_id, away_id, match.home_score, match.away_score, match.half_time_home_score, match.half_time_away_score, kickoff_at)
+        facts = (competition_id, match_season, kickoff_at, home_id, away_id, match.home_score, match.away_score, match.half_time_home_score, match.half_time_away_score, kickoff_at)
         existing_facts = (*facts[:2], _epoch_milliseconds(kickoff_at), *facts[3:9], _epoch_milliseconds(kickoff_at))
         if existing is not None and existing != existing_facts:
             raise RepositoryError("source_fact_conflict")
@@ -573,6 +1148,369 @@ class ImportRepository:
                 """,
                 [outcome_id, snapshot_id, outcome_code, odds_value, source_field],
             )
+
+
+def _execute_set_insert(
+    connection,
+    sql_prefix: str,
+    rows: tuple[tuple[object, ...], ...],
+    *,
+    chunk_size: int = 500,
+) -> None:
+    """用单条多值 INSERT 批量写入，避免 executemany 逐行执行。
+
+    每 500 行分一批是为了控制 SQL 文本和参数数量；每批仍只有一次数据库
+    往返，且调用方已经处于同一个文件事务中，失败会整体回滚。
+    """
+    if not rows:
+        return
+    width = len(rows[0])
+    if width < 1 or any(len(row) != width for row in rows):
+        raise RepositoryError("invalid_record")
+    if chunk_size < 1:
+        raise ValueError("chunk_size_must_be_positive")
+
+    value_placeholders = f"({', '.join('?' for _ in range(width))})"
+    for offset in range(0, len(rows), chunk_size):
+        batch = rows[offset : offset + chunk_size]
+        sql = sql_prefix + ", ".join(value_placeholders for _ in batch)
+        parameters = [value for row in batch for value in row]
+        connection.execute(sql, parameters)
+
+
+def _create_stage_table(
+    connection,
+    path: Path,
+    table_name: str,
+    headers: tuple[str, ...],
+    columns: dict[str, str],
+    rows: tuple[tuple[object, ...], ...],
+) -> str:
+    """把一组已验证记录写成临时 CSV，并注册为 DuckDB 临时表。"""
+    if any(len(row) != len(headers) for row in rows):
+        raise RepositoryError("invalid_record")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.writer(stream, lineterminator="\n")
+        writer.writerow(headers)
+        writer.writerows(rows)
+
+    column_sql = "{" + ", ".join(
+        f"'{name}': '{column_type}'" for name, column_type in columns.items()
+    ) + "}"
+    connection.execute(
+        f"""
+        CREATE TEMP TABLE {table_name} AS
+        SELECT * FROM read_csv(
+            ?,
+            header = true,
+            nullstr = '',
+            columns = {column_sql}
+        )
+        """,
+        [str(path)],
+    )
+    return table_name
+
+
+def _validate_staged_facts(connection, stage_tables: dict[str, str]) -> None:
+    """用集合查询校验幂等重跑，避免为每个稳定 ID 绑定一个参数。"""
+    conflict_queries = (
+        """
+        SELECT 1
+        FROM stage_import_aliases AS staged
+        JOIN team_aliases AS existing
+          ON existing.source = staged.source
+         AND existing.normalized_alias = staged.normalized_alias
+        WHERE existing.id IS DISTINCT FROM staged.alias_id
+           OR existing.team_id IS DISTINCT FROM staged.team_id
+        LIMIT 1
+        """,
+        """
+        SELECT 1
+        FROM stage_import_matches AS staged
+        JOIN matches AS existing ON existing.id = staged.id
+        WHERE existing.competition_id IS DISTINCT FROM staged.competition_id
+           OR existing.season IS DISTINCT FROM staged.season
+           OR epoch_ms(existing.kickoff_at) IS DISTINCT FROM staged.kickoff_ms
+           OR existing.home_team_id IS DISTINCT FROM staged.home_team_id
+           OR existing.away_team_id IS DISTINCT FROM staged.away_team_id
+           OR existing.home_score IS DISTINCT FROM staged.home_score
+           OR existing.away_score IS DISTINCT FROM staged.away_score
+           OR existing.half_time_home_score IS DISTINCT FROM staged.half_time_home_score
+           OR existing.half_time_away_score IS DISTINCT FROM staged.half_time_away_score
+           OR epoch_ms(existing.available_at) IS DISTINCT FROM staged.available_ms
+        LIMIT 1
+        """,
+        """
+        SELECT 1
+        FROM stage_import_markets AS staged
+        JOIN market_snapshots AS existing ON existing.id = staged.id
+        WHERE existing.match_id IS DISTINCT FROM staged.match_id
+           OR existing.provider IS DISTINCT FROM staged.provider
+           OR existing.source IS DISTINCT FROM staged.source
+           OR existing.market_type IS DISTINCT FROM staged.market_type
+           OR existing.handicap_key IS DISTINCT FROM staged.handicap_key
+           OR epoch_ms(existing.captured_at) IS DISTINCT FROM staged.captured_ms
+           OR epoch_ms(existing.available_at) IS DISTINCT FROM staged.available_ms
+           OR existing.stage IS DISTINCT FROM staged.stage
+           OR existing.time_precision IS DISTINCT FROM staged.time_precision
+        LIMIT 1
+        """,
+        """
+        SELECT 1
+        FROM stage_import_outcomes AS staged
+        JOIN market_outcomes AS existing ON existing.id = staged.id
+        WHERE existing.odds_value IS DISTINCT FROM staged.odds_value
+           OR existing.source_field IS DISTINCT FROM staged.source_field
+        LIMIT 1
+        """,
+    )
+    for query in conflict_queries:
+        if connection.execute(query).fetchone() is not None:
+            raise RepositoryError("source_fact_conflict")
+
+
+def _insert_staged_rows(connection, stage_tables: dict[str, str]) -> None:
+    """按外键顺序把临时表一次性写入业务表。"""
+    connection.execute(
+        f"""
+        INSERT OR IGNORE INTO teams (id, name_zh)
+        SELECT team_id, alias FROM {stage_tables['teams']}
+        """
+    )
+    connection.execute(
+        f"""
+        INSERT OR IGNORE INTO team_aliases
+            (id, team_id, source, alias, normalized_alias)
+        SELECT alias_id, team_id, source, alias, normalized_alias
+        FROM {stage_tables['aliases']}
+        """
+    )
+    connection.execute(
+        f"""
+        INSERT OR IGNORE INTO matches (
+            id, competition_id, season, kickoff_at, home_team_id, away_team_id,
+            home_score, away_score, half_time_home_score, half_time_away_score,
+            status, source, source_match_id, available_at
+        )
+        SELECT
+            id, competition_id, season,
+            to_timestamp(kickoff_ms / 1000.0),
+            home_team_id, away_team_id,
+            home_score, away_score, half_time_home_score, half_time_away_score,
+            status, source, source_match_id,
+            to_timestamp(available_ms / 1000.0)
+        FROM {stage_tables['matches']}
+        """
+    )
+    connection.execute(
+        f"""
+        INSERT OR IGNORE INTO market_snapshots
+            (id, match_id, provider, source, market_type, handicap, handicap_key,
+             captured_at, available_at, stage, time_precision)
+        SELECT
+            id, match_id, provider, source, market_type, handicap, handicap_key,
+            to_timestamp(captured_ms / 1000.0),
+            to_timestamp(available_ms / 1000.0),
+            stage, time_precision
+        FROM {stage_tables['markets']}
+        """
+    )
+    connection.execute(
+        f"""
+        INSERT OR IGNORE INTO market_outcomes
+            (id, snapshot_id, outcome_code, odds_value, source_field)
+        SELECT id, snapshot_id, outcome_code, odds_value, source_field
+        FROM {stage_tables['outcomes']}
+        """
+    )
+
+
+def _select_by_ids(
+    connection,
+    table: str,
+    columns: str,
+    ids: tuple[str, ...],
+) -> tuple[tuple[object, ...], ...]:
+    """按内部生成的稳定 ID 批量查询，避免为每条事实单独往返数据库。"""
+    if not ids:
+        return ()
+    placeholders = ", ".join("?" for _ in ids)
+    return tuple(
+        connection.execute(
+            f"SELECT {columns} FROM {table} WHERE id IN ({placeholders})",
+            list(ids),
+        ).fetchall()
+    )
+
+
+def _validate_existing_teams(
+    connection,
+    source: str,
+    teams: tuple[_PreparedTeam, ...],
+) -> None:
+    """检查来源别名的既有归属，防止批量 INSERT OR IGNORE 掩盖冲突。"""
+    if not teams:
+        return
+    by_normalized = {team.normalized_alias: team for team in teams}
+    normalized_aliases = tuple(by_normalized)
+    placeholders = ", ".join("?" for _ in normalized_aliases)
+    existing = connection.execute(
+        f"""
+        SELECT id, team_id, normalized_alias
+        FROM team_aliases
+        WHERE source = ? AND normalized_alias IN ({placeholders})
+        """,
+        [source, *normalized_aliases],
+    ).fetchall()
+    for alias_id, team_id, normalized_alias in existing:
+        expected = by_normalized[normalized_alias]
+        if alias_id != expected.alias_id or team_id != expected.team_id:
+            raise RepositoryError("source_fact_conflict")
+
+    by_alias_id = {team.alias_id: team for team in teams}
+    for alias_id, team_id in _select_by_ids(
+        connection,
+        "team_aliases",
+        "id, team_id",
+        tuple(by_alias_id),
+    ):
+        expected = by_alias_id[alias_id]
+        if team_id != expected.team_id:
+            raise RepositoryError("source_fact_conflict")
+
+
+def _validate_existing_matches(
+    connection,
+    matches: tuple[_PreparedMatch, ...],
+) -> set[str]:
+    existing_ids: set[str] = set()
+    by_id = {match.match_id: match for match in matches}
+    for row in _select_by_ids(
+        connection,
+        "matches",
+        "id, competition_id, season, epoch_ms(kickoff_at), home_team_id, away_team_id, "
+        "home_score, away_score, half_time_home_score, half_time_away_score, "
+        "epoch_ms(available_at)",
+        tuple(by_id),
+    ):
+        match_id = row[0]
+        expected = by_id[match_id]
+        if tuple(row[1:]) != expected.facts:
+            raise RepositoryError("source_fact_conflict")
+        existing_ids.add(match_id)
+    return existing_ids
+
+
+def _validate_existing_markets(
+    connection,
+    markets: tuple[_PreparedMarket, ...],
+) -> None:
+    by_id = {market.snapshot_id: market for market in markets}
+    for row in _select_by_ids(
+        connection,
+        "market_snapshots",
+        "id, match_id, provider, source, market_type, handicap_key, "
+        "epoch_ms(captured_at), epoch_ms(available_at), stage, time_precision",
+        tuple(by_id),
+    ):
+        snapshot_id = row[0]
+        if tuple(row[1:]) != by_id[snapshot_id].facts:
+            raise RepositoryError("source_fact_conflict")
+
+
+def _validate_existing_outcomes(
+    connection,
+    outcomes: tuple[_PreparedOutcome, ...],
+) -> None:
+    by_id = {outcome.outcome_id: outcome for outcome in outcomes}
+    for row in _select_by_ids(
+        connection,
+        "market_outcomes",
+        "id, odds_value, source_field",
+        tuple(by_id),
+    ):
+        outcome_id = row[0]
+        if tuple(row[1:]) != by_id[outcome_id].facts:
+            raise RepositoryError("source_fact_conflict")
+
+
+def _audit_seasons(source_file: SourceFile) -> tuple[str, ...]:
+    """把一个请求文件展开为数据库中应被审计的实际赛季。"""
+    if source_file.source_scope != "combined":
+        return (source_file.season,)
+    if source_file.start_year is None or source_file.end_year is None:
+        return (source_file.season,)
+    if source_file.season_style == "split_year":
+        return tuple(
+            f"{(year - 1) % 100:02d}{year % 100:02d}"
+            for year in range(source_file.start_year + 1, source_file.end_year + 1)
+        )
+    return tuple(str(year) for year in range(source_file.start_year, source_file.end_year + 1))
+
+
+def _sum_match_audit_stats(
+    stats_by_scope: dict[tuple[str, str], dict[str, int]],
+    competition_code: str,
+    seasons: tuple[str, ...],
+) -> dict[str, int]:
+    fields = (
+        "match_count",
+        "complete_full_time_matches",
+        "complete_half_time_matches",
+        "missing_half_time_matches",
+    )
+    result = {field: 0 for field in fields}
+    for season in seasons:
+        row = stats_by_scope.get((competition_code, season))
+        if row is None:
+            continue
+        for field in fields:
+            result[field] += row[field]
+    return result
+
+
+def _sum_market_audit_stats(
+    stats_by_scope: dict[tuple[str, str], dict[str, int]],
+    competition_code: str,
+    seasons: tuple[str, ...],
+) -> dict[str, int]:
+    fields = (
+        "pre_match_market_matches",
+        "kickoff_bound_market_matches",
+        "post_kickoff_market_matches",
+    )
+    result = {field: 0 for field in fields}
+    for season in seasons:
+        row = stats_by_scope.get((competition_code, season))
+        if row is None:
+            continue
+        for field in fields:
+            result[field] += row[field]
+    return result
+
+
+def _merge_market_coverage(
+    markets_by_scope: dict[tuple[str, str], list[DataAuditMarketCoverage]],
+    competition_code: str,
+    seasons: tuple[str, ...],
+) -> tuple[DataAuditMarketCoverage, ...]:
+    totals: dict[str, list[int]] = {}
+    for season in seasons:
+        for market in markets_by_scope.get((competition_code, season), ()):
+            values = totals.setdefault(market.market_type, [0] * 7)
+            values[0] += market.snapshot_count
+            values[1] += market.match_count
+            values[2] += market.pre_match_snapshot_count
+            values[3] += market.pre_match_match_count
+            values[4] += market.kickoff_bound_snapshot_count
+            values[5] += market.kickoff_bound_match_count
+            values[6] += market.post_kickoff_snapshot_count
+    return tuple(
+        DataAuditMarketCoverage(market_type, *values)
+        for market_type, values in sorted(totals.items())
+    )
 
 
 def _utc(value: datetime) -> datetime:

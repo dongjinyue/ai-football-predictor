@@ -3,7 +3,12 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-from app.imports.catalog import COMPETITIONS, build_default_requests
+from app.imports.catalog import (
+    COMBINED_COMPETITION_CODES,
+    COMPETITIONS,
+    build_default_requests,
+    build_historical_requests,
+)
 from app.imports.models import (
     FileImportResult,
     ImportRunResult,
@@ -63,18 +68,18 @@ def test_default_requests_cover_each_configured_league_once_per_season() -> None
     requests = build_default_requests(date(2026, 9, 10), seasons=5)
 
     assert requests
-    assert len(requests) == len(COMPETITIONS) * 5
+    assert len(requests) == 22 * 5 + len(COMBINED_COMPETITION_CODES)
     assert len({item.url for item in requests}) == len(requests)
     assert {item.competition_code for item in requests} == {
         competition[0] for competition in COMPETITIONS
     }
     assert all(item.source == "football_data" for item in requests)
-    # Football-Data 的 www 地址会重定向；目录必须直接生成官方规范地址，
-    # 让下载器不需要泛化为跟随任意第三方重定向。
-    assert all(
-        item.url.startswith("https://football-data.co.uk/mmz4281/")
-        for item in requests
-    )
+    seasonal = [item for item in requests if item.source_scope == "seasonal"]
+    combined = [item for item in requests if item.source_scope == "combined"]
+    assert len(seasonal) == 22 * 5
+    assert len(combined) == len(COMBINED_COMPETITION_CODES)
+    assert all(item.url.startswith("https://football-data.co.uk/mmz4281/") for item in seasonal)
+    assert all(item.url.startswith("https://football-data.co.uk/new/") for item in combined)
 
 
 def test_catalog_matches_all_official_football_data_competitions_and_season_styles() -> None:
@@ -90,16 +95,42 @@ def test_default_requests_use_completed_seasons_for_each_season_style() -> None:
     split_year_seasons = {
         item.season for item in requests if item.competition_code == "E0"
     }
-    calendar_year_seasons = {
-        item.season for item in requests if item.competition_code == "BRA"
-    }
+    calendar_requests = [item for item in requests if item.competition_code == "BRA"]
 
     assert split_year_seasons == {"2526", "2425", "2324", "2223", "2122"}
-    assert calendar_year_seasons == {"2025", "2024", "2023", "2022", "2021"}
+    assert [item.season for item in calendar_requests] == ["2021-2025"]
+    assert calendar_requests[0].start_year == 2021
+    assert calendar_requests[0].end_year == 2025
+    assert calendar_requests[0].source_scope == "combined"
     assert (
         "https://football-data.co.uk/mmz4281/2526/E0.csv"
         in {item.url for item in requests}
     )
+
+
+def test_historical_requests_expand_a_year_range_per_competition_style() -> None:
+    """范围导入按联赛自身的赛季格式生成，不能把 2000 误写成 split-year 的 2000。"""
+    requests = build_historical_requests(2000, 2020, competition_codes=("E0", "BRA"))
+
+    e0 = [item for item in requests if item.competition_code == "E0"]
+    bra = [item for item in requests if item.competition_code == "BRA"]
+
+    assert [item.season for item in e0] == [
+        f"{(end_year - 1) % 100:02d}{end_year % 100:02d}"
+        for end_year in range(2001, 2021)
+    ]
+    assert len(bra) == 1
+    assert bra[0].source_scope == "combined"
+    assert bra[0].season == "2000-2020"
+    assert bra[0].url.endswith("/new/BRA.csv")
+    assert len(requests) == 20 + 1
+
+
+def test_historical_requests_cover_all_configured_competitions_when_codes_omitted() -> None:
+    requests = build_historical_requests(2000, 2020)
+
+    assert len(requests) == 20 * 22 + 16
+    assert {item.competition_code for item in requests} == {item[0] for item in COMPETITIONS}
 
 
 def test_domain_records_are_immutable_and_reports_use_tuples_and_counters() -> None:

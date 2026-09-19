@@ -115,6 +115,59 @@ def test_parser_accepts_bom_four_digit_dates_and_missing_odds(
     assert parsed.matches[0].markets == ()
 
 
+def test_parser_accepts_legacy_cp1252_file(source_file: SourceFile) -> None:
+    """早期源文件的西欧编码不能让整份比赛记录被误判为不可解析。"""
+    content = (
+        "Date,HomeTeam,AwayTeam,FTHG,FTAG\n"
+        "01/05/04,Köln,Visitor,2,1\n"
+    ).encode("cp1252")
+
+    parsed = parse_football_data_csv(source_file, content)
+
+    assert parsed.skipped_rows == 0
+    assert parsed.matches[0].home_team == "Köln"
+
+
+def test_parser_maps_legacy_home_away_headers(source_file: SourceFile) -> None:
+    """希腊早期文件使用 HT/AT，但语义仍是主队和客队。"""
+    content = b"Date,HT,AT,FTHG,FTAG\n01/05/04,Home,Visitor,2,1\n"
+
+    parsed = parse_football_data_csv(source_file, content)
+
+    assert parsed.skipped_rows == 0
+    assert (parsed.matches[0].home_team, parsed.matches[0].away_team) == (
+        "Home",
+        "Visitor",
+    )
+
+
+def test_parser_filters_and_normalizes_combined_source_seasons() -> None:
+    """合并历史文件只导入选择范围，并把来源赛季转成数据库稳定编码。"""
+    source_file = SourceFile(
+        source="football_data",
+        competition_code="ARG",
+        competition_name="Argentine Primera Division",
+        country_code="ARG",
+        season="2000-2020",
+        url="https://football-data.co.uk/new/ARG.csv",
+        source_scope="combined",
+        start_year=2012,
+        end_year=2020,
+        season_style="calendar_year",
+    )
+    content = (
+        "Country,League,Season,Date,Time,Home,Away,HG,AG,Res,AvgCH,AvgCD,AvgCA\n"
+        "Argentina,Liga,2011,01/05/2011,15:00,Too Old,Visitor,1,0,H,2,3,4\n"
+        "Argentina,Liga,2012/2013,01/05/2012,15:00,Included One,Visitor,1,0,H,2,3,4\n"
+        "Argentina,Liga,2014,01/05/2014,15:00,Included Two,Visitor,0,0,D,2,3,4\n"
+    ).encode()
+
+    parsed = parse_football_data_csv(source_file, content)
+
+    assert [match.season for match in parsed.matches] == ["2013", "2014"]
+    assert [match.home_team for match in parsed.matches] == ["Included One", "Included Two"]
+
+
 @pytest.mark.parametrize(
     ("row", "error_code"),
     [

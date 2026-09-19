@@ -8,10 +8,14 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .pytest-tmp-*/
+backend/.pytest-*/
 .mypy_cache/
 .ruff_cache/
 .venv/
 venv/
+
+# Local runtime logs, browser profiles, screenshots, and test copies
+.runtime/
 
 # Frontend
 node_modules/
@@ -40,3 +44,4 @@ Thumbs.db
 
 # Local audit output
 premium-audit.json
+premium-ui.json

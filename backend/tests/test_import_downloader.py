@@ -236,6 +236,21 @@ def test_rejects_invalid_cached_content_without_requesting_network(
     assert requests == 0
 
 
+def test_accepts_combined_source_headers(tmp_path: Path, source_file: SourceFile) -> None:
+    """new/联赛.csv 的合并格式也必须通过下载阶段的表头校验。"""
+    content = (
+        b"\xef\xbb\xbfCountry,League,Season,Date,Time,Home,Away,HG,AG,Res,AvgCH,AvgCD,AvgCA\n"
+        b"Argentina,Liga,2012,01/05/12,15:00,Home,Away,1,0,H,2,3,4\n"
+    )
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, headers={"content-type": "text/csv"}, content=content)
+    )
+
+    downloaded = FootballDataDownloader(_client(transport), tmp_path).download(source_file)
+
+    assert downloaded.content == content
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

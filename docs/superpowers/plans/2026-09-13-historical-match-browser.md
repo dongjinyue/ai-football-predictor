@@ -219,7 +219,7 @@ git commit -m "feat: add historical match API client"
 
 **Interfaces:**
 - Consumes: Task 3 客户端和类型。
-- Produces: `#历史比赛` 可访问页面；摘要、筛选、表格、展开市场、分页及完整状态反馈。
+- Produces: `#history` 可访问页面；摘要、筛选、表格、展开市场、分页及完整状态反馈。
 
 - [ ] **Step 1: 写导航和成功渲染失败测试**
 
@@ -233,7 +233,7 @@ Expected: FAIL，历史页面组件或可用导航不存在。
 
 - [ ] **Step 3: 实现 hash 导航、加载和主表格**
 
-`App` 监听 `hashchange`，只在 hash 为 `#历史比赛` 时渲染 `HistoryPage`。页面挂载时并行请求摘要和第一页；effect cleanup（副作用清理）调用 `controller.abort()`。表格使用真实 `<table>`、`<thead>`、`<tbody>`，窄屏容器使用横向滚动。
+`App` 监听 `hashchange`，只在 hash 为 `#history` 时渲染 `HistoryPage`，并兼容旧的中文哈希链接。页面挂载时并行请求摘要和第一页；effect cleanup（副作用清理）调用 `controller.abort()`。表格使用真实 `<table>`、`<thead>`、`<tbody>`，窄屏容器使用横向滚动。
 
 - [ ] **Step 4: 运行成功路径测试并确认通过**
 
@@ -284,7 +284,7 @@ git commit -m "feat: add historical match browser page"
 
 - [ ] **Step 1: 更新 README 使用说明**
 
-说明先启动后端和前端，再打开 `http://127.0.0.1:4173/#历史比赛`；注明页面只展示已导入数据，空页面时需先按现有导入说明导入数据。每条命令解释工作目录、端口和环境变量作用。
+说明先启动后端和前端，再打开 `http://127.0.0.1:4173/#history`；注明页面只展示已导入数据，空页面时需先按现有导入说明导入数据。每条命令解释工作目录、端口和环境变量作用。
 
 - [ ] **Step 2: 运行完整后端验证**
 

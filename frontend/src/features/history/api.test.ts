@@ -1,6 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { DataRequestError, fetchDataSummary, fetchMatchPage } from './api'
+import {
+  DataRequestError,
+  fetchDataAudit,
+  fetchDataSummary,
+  fetchImportCatalog,
+  fetchImportJob,
+  fetchMatchPage,
+  submitImportJob,
+} from './api'
 
 describe('历史数据 API 客户端', () => {
   afterEach(() => {
@@ -91,6 +99,9 @@ describe('历史数据 API 客户端', () => {
       kickoffAt: '2023-08-11T20:00:00Z',
       homeTeam: 'Arsenal',
       halfTimeHomeScore: 1,
+      halfTimeResult: 'home',
+      fullTimeResult: 'home',
+      totalGoals: 3,
     })
     expect(page.items[0].markets[0]).toEqual({
       marketType: '1X2',
@@ -139,6 +150,120 @@ describe('历史数据 API 客户端', () => {
       marketOutcomes: 2280,
       latestKickoffAt: '2024-05-19T15:00:00Z',
       latestSuccessfulImportAt: null,
+    })
+  })
+
+  it('读取训练前数据审计并保留联赛赛季与盘口时间统计', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: vi.fn().mockResolvedValue({
+        start_year: 2000,
+        end_year: 2020,
+        requested_files: 1,
+        summary: {
+          catalog_competitions: 1,
+          imported_competitions: 1,
+          requested_files: 1,
+          files_with_matches: 1,
+          missing_files: 0,
+          total_matches: 380,
+          complete_full_time_matches: 380,
+          complete_half_time_matches: 379,
+          missing_half_time_matches: 1,
+          half_time_result_matches: 379,
+          total_goals_matches: 380,
+          label_ready_matches: 380,
+          pre_match_market_matches: 120,
+          kickoff_bound_market_matches: 260,
+          post_kickoff_market_matches: 380,
+        },
+        scopes: [{
+          competition_code: 'E0',
+          competition_name: 'English Premier League',
+          country_code: 'ENG',
+          season: '1920',
+          match_count: 380,
+          complete_full_time_matches: 380,
+          complete_half_time_matches: 379,
+          missing_half_time_matches: 1,
+          half_time_result_matches: 379,
+          total_goals_matches: 380,
+          label_ready_matches: 380,
+          pre_match_market_matches: 120,
+          kickoff_bound_market_matches: 260,
+          post_kickoff_market_matches: 380,
+          markets: [{
+            market_type: 'match_result',
+            snapshot_count: 380,
+            match_count: 380,
+            pre_match_snapshot_count: 120,
+            pre_match_match_count: 120,
+            kickoff_bound_snapshot_count: 260,
+            kickoff_bound_match_count: 260,
+            post_kickoff_snapshot_count: 380,
+          }],
+        }],
+      }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(fetchDataAudit(
+      { startYear: 2000, endYear: 2020, competitionCodes: ['E0'] },
+      new AbortController().signal,
+    )).resolves.toMatchObject({
+      startYear: 2000,
+      endYear: 2020,
+      summary: expect.objectContaining({ labelReadyMatches: 380, preMatchMarketMatches: 120 }),
+      scopes: [expect.objectContaining({ competitionCode: 'E0', season: '1920' })],
+    })
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      'http://127.0.0.1:8000/api/data/audit?start_year=2000&end_year=2020&competition_codes=E0',
+    )
+  })
+
+  it('读取导入目录并提交后台导入任务', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: vi.fn().mockResolvedValue({
+          competitions: [{ code: 'E0', name: 'English Premier League', country_code: 'ENG', season_style: 'split_year' }],
+          start_year: 2000,
+          end_year: 2020,
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: vi.fn().mockResolvedValue({
+          job_id: 'job-1', run_id: null, status: 'queued', requested_files: 456,
+          completed_files: 0, failed_files: 0, imported_matches: 0, skipped_rows: 0,
+          errors: [], current_competition_code: null, current_season: null,
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: vi.fn().mockResolvedValue({
+          job_id: 'job-1', run_id: 'run-1', status: 'completed', requested_files: 456,
+          completed_files: 456, failed_files: 0, imported_matches: 1000, skipped_rows: 0,
+          errors: [], current_competition_code: 'E0', current_season: '1920',
+        }),
+      })
+    vi.stubGlobal('fetch', fetchMock)
+    const signal = new AbortController().signal
+
+    await expect(fetchImportCatalog(signal)).resolves.toEqual({
+      competitions: [{ code: 'E0', name: 'English Premier League', countryCode: 'ENG', seasonStyle: 'split_year' }],
+      startYear: 2000,
+      endYear: 2020,
+    })
+    await expect(submitImportJob({ competitionCodes: [], startYear: 2000, endYear: 2020 }, signal)).resolves.toMatchObject({
+      jobId: 'job-1', requestedFiles: 456, status: 'queued',
+    })
+    await expect(fetchImportJob('job-1', signal)).resolves.toMatchObject({
+      jobId: 'job-1', runId: 'run-1', status: 'completed', completedFiles: 456,
+    })
+    expect(fetchMock.mock.calls[1][1]).toMatchObject({
+      method: 'POST',
+      body: JSON.stringify({ start_year: 2000, end_year: 2020, competition_codes: [] }),
     })
   })
 })

@@ -1,11 +1,17 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { fetchDataSummary, fetchMatchPage } from './api'
+import { fetchDataSummary, fetchImportCatalog, fetchImportJob, fetchMatchPage, submitImportJob } from './api'
 import HistoryPage from './HistoryPage'
 import type { DataSummary, HistoricalMatch, MatchPage } from './types'
 
-vi.mock('./api', () => ({ fetchDataSummary: vi.fn(), fetchMatchPage: vi.fn() }))
+vi.mock('./api', () => ({
+  fetchDataSummary: vi.fn(),
+  fetchImportCatalog: vi.fn(),
+  fetchImportJob: vi.fn(),
+  fetchMatchPage: vi.fn(),
+  submitImportJob: vi.fn(),
+}))
 
 const summary: DataSummary = {
   competitions: 1, teams: 20, matches: 380, marketSnapshots: 1140,
@@ -15,7 +21,8 @@ const summary: DataSummary = {
 const match: HistoricalMatch = {
   id: 'arsenal-everton', competitionCode: 'E0', competitionName: '英超', season: '2324',
   kickoffAt: '2024-05-19T15:00:00Z', homeTeam: 'Arsenal', awayTeam: 'Everton',
-  homeScore: 2, awayScore: 1, halfTimeHomeScore: 1, halfTimeAwayScore: 0,
+  homeScore: 2, awayScore: 1, fullTimeResult: 'home', totalGoals: 3,
+  halfTimeHomeScore: 1, halfTimeAwayScore: 0, halfTimeResult: 'home',
   markets: [
     { marketType: 'match_result', stage: 'closing', timePrecision: 'kickoff_bound',
       source: 'football_data', provider: 'average', capturedAt: '2024-05-19T15:00:00Z',
@@ -44,14 +51,29 @@ beforeEach(() => {
   window.history.replaceState(null, '', '/')
   vi.mocked(fetchDataSummary).mockResolvedValue(summary)
   vi.mocked(fetchMatchPage).mockResolvedValue(page)
+  vi.mocked(fetchImportCatalog).mockResolvedValue({
+    competitions: [{ code: 'E0', name: '英超', countryCode: 'ENG', seasonStyle: 'split_year' }],
+    startYear: 2000,
+    endYear: 2020,
+  })
+  vi.mocked(submitImportJob).mockResolvedValue({
+    jobId: 'job-1', runId: null, status: 'queued', requestedFiles: 20,
+    completedFiles: 0, failedFiles: 0, importedMatches: 0, skippedRows: 0,
+    errors: [], currentCompetitionCode: null, currentSeason: null,
+  })
+  vi.mocked(fetchImportJob).mockResolvedValue({
+    jobId: 'job-1', runId: 'run-1', status: 'completed', requestedFiles: 20,
+    completedFiles: 20, failedFiles: 0, importedMatches: 380, skippedRows: 0,
+    errors: [], currentCompetitionCode: 'E0', currentSeason: '1920',
+  })
 })
 afterEach(() => { cleanup(); vi.useRealTimers() })
 
 describe('历史比赛页面', () => {
   it('does not clear a committed query while IME composition is active', async () => {
-    window.history.replaceState(null, '', '/?team=Arsenal')
+    window.history.replaceState(null, '', '/#history?team=Arsenal')
     render(<HistoryPage />)
-    await screen.findByText('Arsenal 2–1 Everton')
+    await screen.findByText('阿森纳 2–1 埃弗顿')
     vi.useFakeTimers()
     const input = screen.getByLabelText('球队')
     fireEvent.compositionStart(input)
@@ -80,10 +102,10 @@ describe('历史比赛页面', () => {
   it('filters, resets page, clears all filters, and enforces pagination boundaries', async () => {
     vi.mocked(fetchMatchPage).mockImplementation(async (filters) => ({ ...page, page: filters.page ?? 1 }))
     render(<HistoryPage />)
-    await screen.findByText('Arsenal 2–1 Everton')
+    await screen.findByText('阿森纳 2–1 埃弗顿')
     expect(screen.getByRole('button', { name: '上一页' })).toBeDisabled()
     fireEvent.click(screen.getByRole('button', { name: '下一页' }))
-    await screen.findByText('第 21–40 场，共 380 场')
+    await screen.findByText('共 380 条')
     fireEvent.change(screen.getByLabelText('联赛'), { target: { value: 'E0' } })
     await waitFor(() => expect(fetchMatchPage).toHaveBeenLastCalledWith(expect.objectContaining({ competition: 'E0', page: 1 }), expect.any(AbortSignal)))
     fireEvent.change(screen.getByLabelText('赛季'), { target: { value: '2324' } })
@@ -95,9 +117,49 @@ describe('历史比赛页面', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: '下一页' })).toBeDisabled())
   })
 
+  it('renders compact pagination controls and applies page size changes', async () => {
+    vi.mocked(fetchMatchPage).mockImplementation(async (filters) => ({
+      ...page,
+      page: filters.page ?? 1,
+      pageSize: filters.pageSize ?? 10,
+      totalItems: 405,
+      totalPages: Math.ceil(405 / (filters.pageSize ?? 10)),
+    }))
+    render(<HistoryPage />)
+    await screen.findByText('阿森纳 2–1 埃弗顿')
+
+    expect(screen.getByText('共 405 条')).toBeInTheDocument()
+    expect(screen.getByLabelText('每页条数')).toHaveValue('10')
+    expect(screen.getByRole('button', { name: '第 1 页' })).toHaveAttribute('aria-current', 'page')
+    expect(screen.getByRole('button', { name: '第 41 页' })).toBeInTheDocument()
+    expect(document.querySelector('.history-page-ellipsis')).toBeInTheDocument()
+    expect(screen.getByLabelText('前往页码')).toHaveValue(1)
+
+    fireEvent.click(screen.getByRole('button', { name: '第 2 页' }))
+    await waitFor(() => expect(fetchMatchPage).toHaveBeenLastCalledWith(
+      expect.objectContaining({ page: 2, pageSize: 10 }),
+      expect.any(AbortSignal),
+    ))
+    expect(window.location.search).toBe('')
+    expect(window.location.hash).toContain('#history?page=2')
+
+    fireEvent.change(screen.getByLabelText('前往页码'), { target: { value: '41' } })
+    fireEvent.keyDown(screen.getByLabelText('前往页码'), { key: 'Enter' })
+    await waitFor(() => expect(fetchMatchPage).toHaveBeenLastCalledWith(
+      expect.objectContaining({ page: 41, pageSize: 10 }),
+      expect.any(AbortSignal),
+    ))
+
+    fireEvent.change(screen.getByLabelText('每页条数'), { target: { value: '20' } })
+    await waitFor(() => expect(fetchMatchPage).toHaveBeenLastCalledWith(
+      expect.objectContaining({ page: 1, pageSize: 20 }),
+      expect.any(AbortSignal),
+    ))
+  })
+
   it('debounces team search for 300ms, respects IME composition, and clears immediately with focus restored', async () => {
     render(<HistoryPage />)
-    await screen.findByText('Arsenal 2–1 Everton')
+    await screen.findByText('阿森纳 2–1 埃弗顿')
     vi.useFakeTimers()
     const input = screen.getByLabelText('球队')
     fireEvent.compositionStart(input)
@@ -125,7 +187,7 @@ describe('历史比赛页面', () => {
     const input = screen.getByLabelText('球队')
     fireEvent.change(input, { target: { value: 'Arsenal' } })
     fireEvent.keyDown(input, { key: 'Enter' })
-    await screen.findByText('Arsenal 2–1 Everton')
+    await screen.findByText('阿森纳 2–1 埃弗顿')
     expect(oldSignal.aborted).toBe(true)
     await act(async () => { resolveOld({ ...page, items: [{ ...match, homeTeam: '过期队名' }] }) })
     expect(screen.queryByText(/过期队名/)).not.toBeInTheDocument()
@@ -136,22 +198,27 @@ describe('历史比赛页面', () => {
 
   it('opens only one match and includes provenance and kickoff-bound warnings', async () => {
     render(<HistoryPage />)
-    await screen.findByText('Arsenal 2–1 Everton')
+    await screen.findByText('阿森纳 2–1 埃弗顿')
     const buttons = screen.getAllByRole('button', { name: /展开市场/ })
     fireEvent.click(buttons[0])
     expect(buttons[0]).toHaveAttribute('aria-expanded', 'true')
-    const details = screen.getByRole('region', { name: 'Arsenal 对 Everton 的市场详情' })
+    const details = screen.getByRole('region', { name: '阿森纳 对 埃弗顿 的市场详情' })
     expect(within(details).getByText('亚洲让球')).toBeInTheDocument()
     expect(within(details).getByText('1.50')).toBeInTheDocument()
-    expect(within(details).getByText('大小球')).toBeInTheDocument()
+    expect(within(details).getByText('大小球（2.5）')).toBeInTheDocument()
     for (const text of ['来源', '提供方', '阶段', '采集时间（记录值）', '可用时间', '时间精度']) {
       expect(within(details).getAllByText(text).length).toBeGreaterThan(0)
     }
     expect(within(details).getAllByText(/仅能确认开球时可用，不能用于开球前回测/).length).toBeGreaterThan(0)
-    expect(within(details).getAllByText('football_data').length).toBeGreaterThan(0)
+    expect(within(details).getAllByText('公开足球数据').length).toBeGreaterThan(0)
+    expect(within(details).getAllByText('收盘').length).toBeGreaterThan(0)
+    expect(within(details).getAllByText('开球时间边界').length).toBeGreaterThan(0)
+    expect(within(details).queryByText('football_data')).not.toBeInTheDocument()
+    expect(within(details).queryByText('closing')).not.toBeInTheDocument()
+    expect(within(details).queryByText('kickoff_bound')).not.toBeInTheDocument()
     fireEvent.click(buttons[1])
     expect(buttons[0]).toHaveAttribute('aria-expanded', 'false')
-    expect(screen.queryByRole('region', { name: 'Arsenal 对 Everton 的市场详情' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: '阿森纳 对 埃弗顿 的市场详情' })).not.toBeInTheDocument()
     fireEvent.click(buttons[1])
     expect(buttons[1]).toHaveAttribute('aria-expanded', 'false')
   })
@@ -181,13 +248,13 @@ describe('历史比赛页面', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('比赛加载失败')
     expect(screen.queryByText(/private server path/)).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '重新加载比赛' }))
-    expect(await screen.findByText('Arsenal 2–1 Everton')).toBeInTheDocument()
+    expect(await screen.findByText('阿森纳 2–1 埃弗顿')).toBeInTheDocument()
   })
 
   it('keeps matches usable when the summary fails and retries only the summary', async () => {
     vi.mocked(fetchDataSummary).mockRejectedValueOnce(new Error('offline'))
     render(<HistoryPage />)
-    expect(await screen.findByText('Arsenal 2–1 Everton')).toBeInTheDocument()
+    expect(await screen.findByText('阿森纳 2–1 埃弗顿')).toBeInTheDocument()
     expect(screen.getByRole('alert')).toHaveTextContent('摘要加载失败')
     fireEvent.click(screen.getByRole('button', { name: '重新加载摘要' }))
     await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument())
@@ -195,16 +262,18 @@ describe('历史比赛页面', () => {
   })
 
   it('restores URL filters on load and browser history navigation', async () => {
-    window.history.replaceState(null, '', '/?competition=E0&season=2324&team=Arsenal&page=3#历史比赛')
+    window.history.replaceState(null, '', '/#history?competition=E0&season=2324&team=Arsenal&page=3')
     vi.mocked(fetchMatchPage).mockImplementation(async (filters) => ({ ...page, page: filters.page ?? 1 }))
     render(<HistoryPage />)
-    await screen.findByText('第 41–60 场，共 380 场')
+    await screen.findByText('共 380 条')
     expect(screen.getByLabelText('球队')).toHaveValue('Arsenal')
+    expect(window.location.search).toBe('')
+    expect(window.location.hash).toContain('competition=E0')
     act(() => {
-      window.history.replaceState(null, '', '/?competition=D1&page=2#历史比赛')
+      window.history.replaceState(null, '', '/#history?competition=D1&page=2')
       window.dispatchEvent(new PopStateEvent('popstate'))
     })
-    await screen.findByText('第 21–40 场，共 380 场')
+    await screen.findByText('共 380 条')
     expect(screen.getByLabelText('联赛')).toHaveValue('D1')
     expect(screen.getByLabelText('球队')).toHaveValue('')
   })
@@ -212,11 +281,31 @@ describe('历史比赛页面', () => {
   it('renders real match scores, half-time scores, odds and the server page range', async () => {
     render(<HistoryPage />)
     const table = await screen.findByRole('table', { name: '历史比赛列表' })
-    expect(within(table).getByText('Arsenal 2–1 Everton')).toBeInTheDocument()
+    expect(within(table).getByText('阿森纳 2–1 埃弗顿')).toBeInTheDocument()
+    expect(within(table).getAllByText('英超（E0）').length).toBeGreaterThan(0)
+    expect(screen.getByRole('option', { name: '英超（E0）' })).toBeInTheDocument()
     expect(within(table).getAllByText('1–0')[0]).toBeInTheDocument()
+    expect(within(table).getAllByText('胜 / 胜')[0]).toBeInTheDocument()
+    expect(within(table).getAllByText('3')[0]).toBeInTheDocument()
     expect(within(table).getAllByText('1.22')[0]).toBeInTheDocument()
     expect(within(table).getAllByText('6.80')[0]).toBeInTheDocument()
     expect(within(table).getAllByText('12.50')[0]).toBeInTheDocument()
-    expect(screen.getByText('第 1–20 场，共 380 场')).toBeInTheDocument()
+    expect(screen.getByText('共 380 条')).toBeInTheDocument()
   })
+
+  it('opens the in-page import controls and starts a background job', async () => {
+    render(<HistoryPage />)
+    await screen.findByText('阿森纳 2–1 埃弗顿')
+    fireEvent.click(screen.getByRole('button', { name: '导入历史数据' }))
+    expect(await screen.findByRole('region', { name: '导入历史数据' })).toBeInTheDocument()
+    expect(screen.getByLabelText('开始年份')).toHaveValue('2000')
+    expect(screen.getByLabelText('结束年份')).toHaveValue('2020')
+    fireEvent.click(screen.getByRole('button', { name: '开始导入' }))
+    await waitFor(() => expect(submitImportJob).toHaveBeenCalledWith(
+      { competitionCodes: [], startYear: 2000, endYear: 2020 },
+      expect.any(AbortSignal),
+    ))
+    expect(await screen.findByText('导入已完成')).toBeInTheDocument()
+  })
+
 })

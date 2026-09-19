@@ -8,34 +8,57 @@ import {
   ShieldCheck,
 } from 'lucide-react'
 import HistoryPage from './features/history/HistoryPage'
+import DataQualityPage from './features/quality/DataQualityPage'
+import { hashRoute, normalizeLocation } from './routing'
 
 const navigation = [
-  { label: '今日赛事', icon: CalendarDays, ready: true },
-  { label: '历史比赛', icon: CalendarDays, ready: true },
-  { label: '历史回测', icon: BarChart3, ready: false },
-  { label: '数据质量', icon: DatabaseZap, ready: false },
-  { label: '模型管理', icon: CircleGauge, ready: false },
+  { label: '今日赛事', route: 'today', icon: CalendarDays, ready: true },
+  { label: '历史比赛', route: 'history', icon: CalendarDays, ready: true },
+  { label: '历史回测', route: 'backtest', icon: BarChart3, ready: false },
+  { label: '数据质量', route: 'quality', icon: DatabaseZap, ready: true },
+  { label: '模型管理', route: 'models', icon: CircleGauge, ready: false },
 ]
 
 const foundationItems = [
-  { label: '前端工作台', detail: 'React + TypeScript', ready: true },
-  { label: '后端服务', detail: 'FastAPI', ready: true },
+  { label: '前端工作台', detail: '前端界面', ready: true },
+  { label: '后端服务', detail: '接口服务', ready: true },
   { label: '预测模型', detail: '等待后续模块', ready: false },
 ]
 
 function App() {
-  const [hash, setHash] = useState(window.location.hash)
-  const isHistory = hash === '#历史比赛' || hash === `#${encodeURIComponent('历史比赛')}`
+  const [hash, setHash] = useState(() => normalizeLocation(new URL(window.location.href)).hash)
+  const activeRoute = hashRoute(hash) || 'today'
+  const isHistory = activeRoute === 'history'
+  const isQuality = activeRoute === 'quality'
 
   useEffect(() => {
-    const updateHash = () => setHash(window.location.hash)
+    const updateHash = () => {
+      const currentUrl = new URL(window.location.href)
+      const normalizedUrl = normalizeLocation(currentUrl)
+      const normalizedHash = normalizedUrl.hash
+      const currentLocation = `${window.location.pathname}${window.location.search}${window.location.hash}`
+      const normalizedLocation = `${normalizedUrl.pathname}${normalizedUrl.search}${normalizedUrl.hash}`
+
+      if (normalizedLocation !== currentLocation) {
+        window.history.replaceState(null, '', normalizedLocation)
+      }
+
+      setHash(normalizedHash)
+    }
+
     window.addEventListener('hashchange', updateHash)
+    updateHash()
     return () => window.removeEventListener('hashchange', updateHash)
   }, [])
 
   useEffect(() => {
-    document.title = `${isHistory ? '历史比赛' : '今日赛事分析'} · 赛前分析台`
-  }, [isHistory])
+    const pageTitles: Record<string, string> = {
+      history: '历史比赛',
+      quality: '数据质量',
+      today: '今日赛事分析',
+    }
+    document.title = `${pageTitles[activeRoute] ?? pageTitles.today} · 赛前分析台`
+  }, [activeRoute])
 
   return (
     <div className="app-shell">
@@ -47,16 +70,16 @@ function App() {
         </div>
 
         <div className="brand-copy">
-          <p className="eyebrow">AI Football Predictor</p>
+          <p className="eyebrow">智能足球预测</p>
           <p className="brand-title">赛前分析台</p>
         </div>
 
         <nav aria-label="主要导航" className="primary-nav">
-          {navigation.map(({ label, icon: Icon, ready }) => (
+          {navigation.map(({ label, route, icon: Icon, ready }) => (
             <a
-              aria-current={label === (isHistory ? '历史比赛' : '今日赛事') ? 'page' : undefined}
+              aria-current={route === activeRoute ? 'page' : undefined}
               className="nav-link"
-              href={`#${label}`}
+              href={`#${route}`}
               key={label}
             >
               <Icon aria-hidden="true" size={19} strokeWidth={1.75} />
@@ -73,7 +96,7 @@ function App() {
       </aside>
 
       <main className="main-content">
-        {isHistory ? <HistoryPage /> : <>
+        {isHistory ? <HistoryPage /> : isQuality ? <DataQualityPage /> : <>
         <header className="page-header">
           <div>
             <p className="eyebrow page-index">工作台 / 基础骨架</p>
@@ -92,7 +115,7 @@ function App() {
         <section className="status-board" aria-labelledby="foundation-title">
           <div className="board-heading">
             <div>
-              <p className="eyebrow">Foundation status</p>
+              <p className="eyebrow">基础状态</p>
               <h2 id="foundation-title">基础模块状态</h2>
             </div>
             <Activity aria-hidden="true" size={24} strokeWidth={1.5} />
@@ -118,7 +141,7 @@ function App() {
             <span className="pitch-center" />
           </div>
           <div>
-            <p className="eyebrow">Next module</p>
+            <p className="eyebrow">后续模块</p>
             <h2 id="empty-title">预测模型尚未接入</h2>
             <p>
               当前页面只验证项目结构和前后端运行基础，不展示示例胜率，避免把占位数据误认为真实预测。
