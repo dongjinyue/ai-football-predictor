@@ -1,0 +1,40 @@
+{
+  "errorCode": "0",
+  "errorMessage": "处理成功",
+  "success": true,
+  "value": {
+    "isCancel": 0,
+    "oddsHistory": {
+      "matchId": 62373,
+      "leagueId": 25,
+      "leagueAbbName": "英超",
+      "leagueAllName": "英格兰超级联赛",
+      "homeTeamId": 1001,
+      "homeTeamAbbName": "主队甲",
+      "homeTeamAllName": "主队甲足球俱乐部",
+      "awayTeamId": 1002,
+      "awayTeamAbbName": "客队乙",
+      "awayTeamAllName": "客队乙足球俱乐部",
+      "hadList": [
+        {"h": "1.80", "d": "3.20", "a": "4.20", "hf": "0", "df": "0", "af": "0", "goalLine": "", "updateDate": "2015-01-02", "updateTime": "09:30:00"}
+      ],
+      "hhadList": [
+        {"h": "3.10", "d": "3.50", "a": "1.95", "hf": "0", "df": "0", "af": "0", "goalLine": "-1", "updateDate": "2015-01-02", "updateTime": "10:30:00"}
+      ],
+      "ttgList": [
+        {"s0": "12.0", "s1": "5.50", "s2": "3.60", "s3": "3.40", "s4": "4.50", "s5": "7.50", "s6": "12.0", "s7": "16.0", "goalLine": "", "updateDate": "2015-01-02", "updateTime": "11:30:00"}
+      ],
+      "crsList": [
+        {"s01s00": "8.0", "s02s00": "10.0", "s02s01": "7.0", "s03s00": "18.0", "s03s01": "12.0", "s03s02": "15.0", "s04s00": "30.0", "s04s01": "25.0", "s04s02": "35.0", "s05s00": "60.0", "s05s01": "50.0", "s05s02": "70.0", "s00s00": "12.0", "s01s01": "7.0", "s02s02": "12.0", "s03s03": "30.0", "s00s01": "10.0", "s00s02": "15.0", "s01s02": "9.0", "s00s03": "30.0", "s01s03": "20.0", "s02s03": "25.0", "s00s04": "60.0", "s01s04": "50.0", "s02s04": "55.0", "s00s05": "120.0", "s01s05": "100.0", "s02s05": "110.0", "s-1sh": "20.0", "s-1sd": "80.0", "s-1sa": "35.0", "goalLine": "", "updateDate": "2015-01-02", "updateTime": "12:30:00"}
+      ],
+      "hafuList": [
+        {"hh": "2.80", "hd": "13.0", "ha": "30.0", "dh": "4.50", "dd": "5.00", "da": "10.0", "ah": "20.0", "ad": "13.0", "aa": "6.00", "goalLine": "", "updateDate": "2015-01-02", "updateTime": "13:30:00"}
+      ],
+      "singleList": [
+        {"poolCode": "HAD", "single": 1},
+        {"poolCode": "TTG", "single": 0}
+      ]
+    },
+    "matchResultList": []
+  }
+}

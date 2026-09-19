@@ -58,10 +58,10 @@
 - Produces: `parse_match_page(payload) -> MatchPageRecord`
 - Produces: `parse_fixed_bonus(payload) -> FixedBonusRecord`
 
-- [ ] 从用户提供的响应裁剪脱敏 fixture（固定测试样例），保留真实字段结构。
-- [ ] 写失败测试，覆盖分页元数据、比赛赛果、`hadList`、`hhadList`、`ttgList`、`crsList`、`hafuList`、空玩法和非法奖金。
-- [ ] 实现不可变 dataclass（数据类）和 Asia/Shanghai 到 UTC 的精确时间解析。
-- [ ] 运行 `pytest tests/test_sporttery_parser.py -q` 并确认通过。
+- [x] 从用户提供的响应裁剪脱敏 fixture（固定测试样例），保留真实字段结构。
+- [x] 写失败测试，覆盖分页元数据、比赛赛果、`hadList`、`hhadList`、`ttgList`、`crsList`、`hafuList`、空玩法和非法奖金。
+- [x] 实现不可变 dataclass（数据类）和 Asia/Shanghai 到 UTC 的精确时间解析。
+- [x] 运行 `pytest tests/test_sporttery_parser.py -q` 并确认通过。
 
 ### Task 3: 原始响应、检查点与幂等数据库
 

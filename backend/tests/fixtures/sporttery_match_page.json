@@ -1,0 +1,58 @@
+{
+  "dataFrom": "",
+  "emptyFlag": false,
+  "errorCode": "0",
+  "errorMessage": "处理成功",
+  "success": true,
+  "value": {
+    "resultCount": 2,
+    "total": 44,
+    "pages": 2,
+    "pageNo": 1,
+    "pageSize": 30,
+    "matchResult": [
+      {
+        "matchId": 62373,
+        "matchDate": "2015-01-03",
+        "matchNum": "023",
+        "matchNumStr": "周六023",
+        "leagueId": 25,
+        "leagueName": "英格兰超级联赛",
+        "leagueNameAbbr": "英超",
+        "homeTeamId": 1001,
+        "homeTeam": "主队甲",
+        "allHomeTeam": "主队甲足球俱乐部",
+        "awayTeamId": 1002,
+        "awayTeam": "客队乙",
+        "allAwayTeam": "客队乙足球俱乐部",
+        "sectionsNo1": "1:0",
+        "sectionsNo999": "2:1",
+        "winFlag": "H",
+        "goalLine": "-1",
+        "matchResultStatus": "2",
+        "poolStatus": "Payout",
+        "resultStatus": ""
+      },
+      {
+        "matchId": 62374,
+        "matchDate": "2015-01-03",
+        "matchNum": "024",
+        "matchNumStr": "周六024",
+        "leagueId": 37,
+        "leagueName": "德国甲级联赛",
+        "leagueNameAbbr": "德甲",
+        "homeTeamId": 1003,
+        "homeTeam": "主队丙",
+        "awayTeamId": 1004,
+        "awayTeam": "客队丁",
+        "sectionsNo1": "0:0",
+        "sectionsNo999": "0:0",
+        "winFlag": "D",
+        "goalLine": "0",
+        "matchResultStatus": "2",
+        "poolStatus": "Payout",
+        "resultStatus": ""
+      }
+    ]
+  }
+}
