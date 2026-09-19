@@ -16,6 +16,11 @@ REQUIRED_TABLES = {
     "market_snapshots",
     "matches",
     "schema_migrations",
+    "sporttery_bonus_outcomes",
+    "sporttery_bonus_snapshots",
+    "sporttery_matches",
+    "sporttery_requests",
+    "sporttery_single_pools",
     "team_aliases",
     "teams",
 }
@@ -53,8 +58,8 @@ def test_initialize_database_can_run_twice_without_losing_schema(
     status = get_database_status(database_path)
     assert status.ready is True
     assert status.engine == "duckdb"
-    assert status.schema_version == 6
-    assert status.table_count == 9
+    assert status.schema_version == 7
+    assert status.table_count == 14
 
 
 @pytest.mark.parametrize("time_precision", ["result_after_kickoff", "date_only_unknown"])
@@ -113,7 +118,7 @@ def test_initialize_database_upgrades_real_v3_audit_schema_to_v4(
     initialize_database(database_path)
     initialize_database(database_path)
 
-    assert get_database_status(database_path).schema_version == 6
+    assert get_database_status(database_path).schema_version == 7
     assert column_details(database_path, "import_files")["downloaded_at"] == "TIMESTAMP WITH TIME ZONE"
     assert "half_time_home_score" in column_details(database_path, "matches")
     with duckdb.connect(str(database_path)) as connection:

@@ -78,10 +78,10 @@
 - Produces: `CheckpointStore.load(year)`、`CheckpointStore.save(checkpoint)`
 - Produces: `SportteryRepository.import_match_page(...)`、`import_fixed_bonus(...)`、`coverage_report(year)`
 
-- [ ] 写失败测试，验证原子写入、SHA-256、损坏文件拒绝、检查点恢复和数据库重复导入计数不增长。
-- [ ] 新增竞彩请求审计、比赛元数据及与现有核心表兼容的唯一约束迁移。
-- [ ] 实现原始响应和检查点的临时文件加原子替换，避免中途退出留下半个 JSON。
-- [ ] 运行新增存储与仓储测试并确认通过。
+- [x] 写失败测试，验证原子写入、SHA-256、损坏文件拒绝、检查点恢复和数据库重复导入计数不增长。
+- [x] 新增竞彩请求审计、比赛元数据及与现有核心表兼容的唯一约束迁移。
+- [x] 实现原始响应和检查点的临时文件加原子替换，避免中途退出留下半个 JSON。
+- [x] 运行新增存储与仓储测试并确认通过。
 
 ### Task 4: 可恢复采集服务与命令行
 

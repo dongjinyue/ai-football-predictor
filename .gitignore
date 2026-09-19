@@ -26,6 +26,8 @@ coverage/
 # Local data and model artifacts
 data/raw/*
 data/raw/football_data/**
+data/raw/sporttery/**
+data/reports/sporttery-*.json
 data/interim/*
 data/processed/*
 models/*

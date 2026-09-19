@@ -14,6 +14,11 @@ REQUIRED_TABLES = frozenset(
         "market_snapshots",
         "matches",
         "schema_migrations",
+        "sporttery_bonus_outcomes",
+        "sporttery_bonus_snapshots",
+        "sporttery_matches",
+        "sporttery_requests",
+        "sporttery_single_pools",
         "team_aliases",
         "teams",
     }
