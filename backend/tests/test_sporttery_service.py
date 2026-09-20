@@ -123,6 +123,28 @@ def test_resume_replays_cached_pages_into_idempotent_repository(tmp_path: Path) 
     assert calls == 2
 
 
+def test_resume_replays_cached_bonus_without_network_requests(tmp_path: Path) -> None:
+    """已完成奖金也要从缓存重放，才能补齐数据库升级后的页面映射。"""
+    _service(tmp_path, FakeClient()).collect_range(
+        date(2015, 1, 1), date(2015, 1, 3)
+    )
+    second_client = FakeClient()
+    service = _service(tmp_path, second_client)
+    calls = 0
+    original = service.repository.import_fixed_bonus
+
+    def recording_import(record, raw):
+        nonlocal calls
+        calls += 1
+        original(record, raw)
+
+    service.repository.import_fixed_bonus = recording_import
+    service.collect_range(date(2015, 1, 1), date(2015, 1, 3), resume=True)
+
+    assert second_client.bonus_calls == []
+    assert calls == 2
+
+
 def test_valid_raw_pages_are_reused_when_crash_preceded_checkpoint(tmp_path: Path) -> None:
     """原始文件已落盘但检查点未写入时，恢复过程不能重复访问列表接口。"""
     client = FakeClient()

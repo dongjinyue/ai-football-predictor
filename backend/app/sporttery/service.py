@@ -149,8 +149,6 @@ class SportteryCollectionService:
         completed = set(checkpoint.completed_bonus_ids)
         failed = set(checkpoint.failed_bonus_ids)
         for match_id in checkpoint.match_ids:
-            if match_id in completed:
-                continue
             try:
                 stored = self.raw_store.load("fixed_bonus", start_date.year, str(match_id))
                 if stored is None:
@@ -175,8 +173,13 @@ class SportteryCollectionService:
                     checkpoint, start_date, end_date, duplicate_rows, "blocked", error.code
                 )
             except (SourceBusinessError, SportterySourceError, SportteryParseError) as error:
+                completed.discard(match_id)
                 failed.add(match_id)
-                checkpoint = replace(checkpoint, failed_bonus_ids=tuple(sorted(failed)))
+                checkpoint = replace(
+                    checkpoint,
+                    completed_bonus_ids=tuple(sorted(completed)),
+                    failed_bonus_ids=tuple(sorted(failed)),
+                )
                 self.checkpoint_store.save(checkpoint)
                 code = error.code if isinstance(error, SportterySourceError) else f"parse_{error}"
                 self.progress({"event": "fixed_bonus", "match_id": match_id, "status": "failed", "code": code})
