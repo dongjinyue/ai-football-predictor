@@ -590,7 +590,7 @@ class ImportRepository:
                     match.id, CAST(match.kickoff_at AS VARCHAR), competition.source_competition_id,
                     competition.name_zh, match.season, home.name_zh, away.name_zh,
                     match.half_time_home_score, match.half_time_away_score, match.home_score,
-                    match.away_score
+                    match.away_score, match.kickoff_time_precision
                 FROM matches AS match
                 JOIN competitions AS competition ON competition.id = match.competition_id
                 JOIN teams AS home ON home.id = match.home_team_id
@@ -639,6 +639,7 @@ class ImportRepository:
                 home_score=row[9],
                 away_score=row[10],
                 markets=markets_by_match.get(row[0], ()),
+                kickoff_time_precision=row[11],
             )
             for row in match_rows
         )

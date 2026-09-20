@@ -104,6 +104,19 @@ def test_invalid_match_identity_rejects_the_whole_payload() -> None:
         parse_match_page(payload)
 
 
+def test_same_team_match_is_skipped_without_losing_the_rest_of_the_page() -> None:
+    """官方偶发的主客队相同记录不可训练，但不应阻断同页正常比赛。"""
+    payload = _fixture("sporttery_match_page.json")
+    invalid = payload["value"]["matchResult"][0]
+    invalid["awayTeamId"] = invalid["homeTeamId"]
+    invalid["awayTeam"] = invalid["homeTeam"]
+
+    parsed = parse_match_page(payload)
+
+    assert [match.match_id for match in parsed.matches] == [62374]
+    assert parsed.rejected_matches == 1
+
+
 def test_refunded_invalid_match_keeps_identity_without_training_label() -> None:
     """旧数据中的“无效场次”应保留审计身份，但不能伪造比分和赛果。"""
     payload = _fixture("sporttery_match_page.json")
@@ -149,4 +162,21 @@ def test_official_invalid_result_markers_do_not_create_labels(marker: str) -> No
 
     parsed = parse_match_page(payload).matches[0]
 
+    assert (parsed.home_score, parsed.away_score, parsed.result) == (None, None, None)
+
+
+def test_refunded_match_ignores_negative_half_time_sentinel() -> None:
+    """退款场次会用 -1:-1 表示无半场比分，该哨兵值不能阻断整页导入。"""
+    payload = _fixture("sporttery_match_page.json")
+    match = payload["value"]["matchResult"][0]
+    match.update({
+        "sectionsNo1": "-1:-1",
+        "sectionsNo999": "无效场次",
+        "winFlag": "",
+        "poolStatus": "Refund",
+    })
+
+    parsed = parse_match_page(payload).matches[0]
+
+    assert (parsed.half_time_home_score, parsed.half_time_away_score) == (None, None)
     assert (parsed.home_score, parsed.away_score, parsed.result) == (None, None, None)

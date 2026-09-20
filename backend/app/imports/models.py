@@ -231,6 +231,8 @@ class HistoricalMatchView:
     home_score: int | None
     away_score: int | None
     markets: tuple[MatchMarketView, ...]
+    # date_only 的 kickoff_at 仅为排序锚点，界面不得显示其时分秒。
+    kickoff_time_precision: str = "exact"
 
 
 @dataclass(frozen=True)

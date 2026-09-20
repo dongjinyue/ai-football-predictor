@@ -117,6 +117,9 @@ const marketTypeNames: Record<string, string> = {
   asian_handicap: '亚洲让球',
   handicap_result: '让球胜平负',
   over_under_2_5: '大小球（2.5）',
+  total_goals: '总进球',
+  correct_score: '比分',
+  half_full: '半全场',
 }
 
 const outcomeNames: Record<string, string> = {
@@ -133,11 +136,13 @@ const sourceNames: Record<string, string> = {
   legacy_unknown: '历史兼容数据',
   manual: '手工导入',
   sports_lottery: '体育彩票数据',
+  sporttery: '中国体育彩票',
 }
 
 const providerNames: Record<string, string> = {
   average: '市场平均',
   williamhill: '威廉希尔',
+  china_sports_lottery: '中国体育彩票',
 }
 
 const stageNames: Record<string, string> = {

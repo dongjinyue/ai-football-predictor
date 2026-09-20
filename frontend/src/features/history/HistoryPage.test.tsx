@@ -20,7 +20,7 @@ const summary: DataSummary = {
 }
 const match: HistoricalMatch = {
   id: 'arsenal-everton', competitionCode: 'E0', competitionName: '英超', season: '2324',
-  kickoffAt: '2024-05-19T15:00:00Z', homeTeam: 'Arsenal', awayTeam: 'Everton',
+  kickoffAt: '2024-05-19T15:00:00Z', kickoffTimePrecision: 'exact', homeTeam: 'Arsenal', awayTeam: 'Everton',
   homeScore: 2, awayScore: 1, fullTimeResult: 'home', totalGoals: 3,
   halfTimeHomeScore: 1, halfTimeAwayScore: 0, halfTimeResult: 'home',
   markets: [
@@ -70,6 +70,23 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.useRealTimers() })
 
 describe('历史比赛页面', () => {
+  it('体彩比赛只有日期时明确显示时间未知', async () => {
+    vi.mocked(fetchMatchPage).mockResolvedValue({
+      ...page,
+      items: [{
+        ...match,
+        id: 'sporttery-date-only',
+        kickoffAt: '2015-01-03T04:00:00Z',
+        kickoffTimePrecision: 'date_only',
+      }],
+    })
+
+    render(<HistoryPage />)
+
+    expect(await screen.findByText('2015/1/3（时间未知）')).toBeInTheDocument()
+    expect(screen.queryByText(/12:00:00/)).not.toBeInTheDocument()
+  })
+
   it('does not clear a committed query while IME composition is active', async () => {
     window.history.replaceState(null, '', '/#history?team=Arsenal')
     render(<HistoryPage />)

@@ -60,6 +60,7 @@ describe('历史数据 API 客户端', () => {
             competition_name: 'Premier League',
             season: '2324',
             kickoff_at: '2023-08-11T20:00:00Z',
+            kickoff_time_precision: 'date_only',
             home_team: 'Arsenal',
             away_team: 'Everton',
             half_time_home_score: 1,
@@ -97,6 +98,7 @@ describe('历史数据 API 客户端', () => {
     expect(page.items[0]).toMatchObject({
       competitionCode: 'E0',
       kickoffAt: '2023-08-11T20:00:00Z',
+      kickoffTimePrecision: 'date_only',
       homeTeam: 'Arsenal',
       halfTimeHomeScore: 1,
       halfTimeResult: 'home',

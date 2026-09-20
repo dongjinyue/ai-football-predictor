@@ -53,6 +53,7 @@ class MatchPageRecord:
     pages: int
     total: int
     matches: tuple[SportteryMatch, ...]
+    rejected_matches: int = 0
 
 
 @dataclass(frozen=True)

@@ -42,7 +42,7 @@ def test_database_status_reports_initialized_schema(tmp_path: Path) -> None:
     assert response.json() == {
         "status": "ready",
         "engine": "duckdb",
-        "schema_version": 7,
+        "schema_version": 8,
         "table_count": 14,
     }
 

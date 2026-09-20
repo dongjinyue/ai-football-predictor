@@ -41,6 +41,7 @@ interface MatchResponse {
   competition_name: string
   season: string
   kickoff_at: string
+  kickoff_time_precision?: 'exact' | 'date_only'
   home_team: string
   away_team: string
   half_time_home_score: number | null
@@ -227,6 +228,7 @@ function formatMatch(match: MatchResponse): HistoricalMatch {
     competitionName: match.competition_name,
     season: match.season,
     kickoffAt: match.kickoff_at,
+    kickoffTimePrecision: match.kickoff_time_precision ?? 'exact',
     homeTeam: match.home_team,
     awayTeam: match.away_team,
     halfTimeHomeScore: match.half_time_home_score,

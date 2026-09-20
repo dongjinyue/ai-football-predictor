@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, time
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import duckdb
 
-from app.sporttery.models import FixedBonusRecord, MatchPageRecord
+from app.sporttery.models import BonusSnapshot, FixedBonusRecord, MatchPageRecord
 from app.sporttery.storage import StoredResponse
 from app.storage import initialize_database
 
@@ -40,21 +42,51 @@ class SportteryRepository:
         with duckdb.connect(str(self.database_path)) as connection:
             connection.execute("BEGIN TRANSACTION")
             try:
+                match_ids = [match.match_id for match in page.matches]
+                core_ids = {
+                    match.match_id: _stable_id("core-match", str(match.match_id))
+                    for match in page.matches
+                }
+                placeholders = ", ".join("?" for _ in match_ids)
+                if match_ids:
+                    existing_core_ids = {
+                        str(row[0])
+                        for row in connection.execute(
+                            f"SELECT id FROM matches WHERE id IN ({placeholders})",
+                            list(core_ids.values()),
+                        ).fetchall()
+                    }
+                    existing_match_ids = {
+                        int(row[0])
+                        for row in connection.execute(
+                            f"SELECT match_id FROM sporttery_matches WHERE match_id IN ({placeholders})",
+                            match_ids,
+                        ).fetchall()
+                    }
+                else:
+                    existing_core_ids = set()
+                    existing_match_ids = set()
+
                 for match in page.matches:
+                    core_match_id = core_ids[match.match_id]
+                    if core_match_id not in existing_core_ids:
+                        self._sync_core_match(connection, match, raw)
+                    if match.match_id in existing_match_ids:
+                        continue
                     connection.execute(
                         """
                         INSERT OR IGNORE INTO sporttery_matches (
-                            match_id, match_date, match_number, match_number_label,
+                            match_id, core_match_id, match_date, match_number, match_number_label,
                             league_id, league_name, league_abbreviation,
                             home_team_id, home_team_name, home_team_full_name,
                             away_team_id, away_team_name, away_team_full_name,
                             half_time_home_score, half_time_away_score,
                             home_score, away_score, result, handicap,
                             result_status, pool_status, raw_sha256
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         [
-                            match.match_id, match.match_date, match.match_number,
+                            match.match_id, core_match_id, match.match_date, match.match_number,
                             match.match_number_label, match.league_id, match.league_name,
                             match.league_abbreviation, match.home_team_id, match.home_team,
                             match.home_team_full_name, match.away_team_id, match.away_team,
@@ -115,6 +147,7 @@ class SportteryRepository:
                         """,
                         [record.match_id, pool_code, is_single, raw.sha256],
                     )
+                self._sync_core_markets(connection, record)
                 self._insert_request(connection, "fixed_bonus", raw)
             except Exception:
                 connection.execute("ROLLBACK")
@@ -175,10 +208,116 @@ class SportteryRepository:
             VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             [request_key, kind, raw.request_url, str(raw.path), raw.sha256,
-             raw.status_code, raw.fetched_at],
+            raw.status_code, raw.fetched_at],
         )
+
+    @staticmethod
+    def _sync_core_match(connection, match, raw: StoredResponse) -> None:
+        """把体彩比赛同步到现有历史浏览表，并明确标记日期精度。"""
+        competition_code = (
+            f"JC{match.league_id}"
+            if match.league_id > 0
+            else f"JC0-{_stable_id('league-name', match.league_name)[:8]}"
+        )
+        competition_id = _stable_id("core-competition", competition_code)
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO competitions
+                (id, name_zh, source, source_competition_id)
+            VALUES (?, ?, 'sporttery', ?)
+            """,
+            [competition_id, match.league_name, competition_code],
+        )
+
+        team_rows = (
+            (match.home_team_id, match.home_team_full_name or match.home_team),
+            (match.away_team_id, match.away_team_full_name or match.away_team),
+        )
+        core_team_ids: list[str] = []
+        for source_team_id, name in team_rows:
+            team_id = _stable_id("core-team", str(source_team_id))
+            alias_id = _stable_id("core-team-alias", str(source_team_id))
+            connection.execute(
+                "INSERT OR IGNORE INTO teams (id, name_zh) VALUES (?, ?)",
+                [team_id, name],
+            )
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO team_aliases
+                    (id, team_id, source, alias, normalized_alias)
+                VALUES (?, ?, 'sporttery', ?, ?)
+                """,
+                [alias_id, team_id, name, f"sporttery:{source_team_id}"],
+            )
+            core_team_ids.append(team_id)
+
+        core_match_id = _stable_id("core-match", str(match.match_id))
+        # 中午只作为不跨日期的排序锚点；kickoff_time_precision 明确说明它不是开球时刻。
+        kickoff_anchor = datetime.combine(
+            match.match_date, time(12, 0), tzinfo=ZoneInfo("Asia/Shanghai")
+        ).astimezone(ZoneInfo("UTC"))
+        status = "finished" if match.home_score is not None else "cancelled"
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO matches (
+                id, competition_id, season, kickoff_at, home_team_id, away_team_id,
+                home_score, away_score, status, source, source_match_id,
+                available_at, half_time_home_score, half_time_away_score,
+                kickoff_time_precision
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'sporttery', ?, ?, ?, ?, 'date_only')
+            """,
+            [
+                core_match_id, competition_id, str(match.match_date.year), kickoff_anchor,
+                core_team_ids[0], core_team_ids[1], match.home_score, match.away_score,
+                status, str(match.match_id), raw.fetched_at,
+                match.half_time_home_score, match.half_time_away_score,
+            ],
+        )
+
+    @staticmethod
+    def _sync_core_markets(connection, record: FixedBonusRecord) -> None:
+        # 兼容早期 core_match_id 为空且已被外键引用、无法再 UPDATE 的历史行。
+        core_match_id = _stable_id("core-match", str(record.match_id))
+        latest: dict[tuple[str, str], BonusSnapshot] = {}
+        for snapshot in record.snapshots:
+            line_key = "none" if snapshot.line is None else format(snapshot.line, "g")
+            key = (snapshot.market_type, line_key)
+            existing = latest.get(key)
+            if existing is None or snapshot.captured_at > existing.captured_at:
+                latest[key] = snapshot
+
+        for (market_type, _line_key), snapshot in latest.items():
+            core_line_key = "none" if snapshot.line is None else f"{snapshot.line:.2f}"
+            snapshot_id = _stable_id(
+                "core-market", core_match_id, market_type, core_line_key,
+                snapshot.captured_at.isoformat(),
+            )
+            odds = dict(snapshot.outcomes)
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO market_snapshots (
+                    id, match_id, provider, source, market_type, handicap,
+                    handicap_key, home_value, draw_value, away_value,
+                    captured_at, available_at, stage, time_precision
+                ) VALUES (?, ?, 'china_sports_lottery', 'sporttery', ?, ?, ?, ?, ?, ?, ?, ?, 'closing', 'exact')
+                """,
+                [
+                    snapshot_id, core_match_id, market_type, snapshot.line, core_line_key,
+                    odds.get("home"), odds.get("draw"), odds.get("away"),
+                    snapshot.captured_at, snapshot.captured_at,
+                ],
+            )
+            for outcome_code, odds_value in snapshot.outcomes:
+                outcome_id = _stable_id("core-outcome", snapshot_id, outcome_code)
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO market_outcomes
+                        (id, snapshot_id, outcome_code, odds_value, source_field)
+                    VALUES (?, ?, ?, ?, 'sporttery.fixed_bonus')
+                    """,
+                    [outcome_id, snapshot_id, outcome_code, odds_value],
+                )
 
 
 def _stable_id(kind: str, *parts: str) -> str:
     return str(uuid.uuid5(_NAMESPACE, ":".join((kind, *parts))))
-

@@ -30,6 +30,21 @@ function halfFullResult(
   return `${resultText(halfTimeResult)} / ${resultText(fullTimeResult)}`
 }
 
+/** 只有比赛日期时隐藏排序锚点的虚拟时刻，避免用户把 12:00 当成真实开球时间。 */
+function kickoffText(match: HistoricalMatch) {
+  const kickoff = new Date(match.kickoffAt)
+  if (match.kickoffTimePrecision === 'date_only') {
+    const date = new Intl.DateTimeFormat('zh-CN', {
+      timeZone: 'Asia/Shanghai',
+      year: 'numeric',
+      month: 'numeric',
+      day: 'numeric',
+    }).format(kickoff)
+    return `${date}（时间未知）`
+  }
+  return kickoff.toLocaleString('zh-CN')
+}
+
 function MarketDetails({ market }: { market: MatchMarket }) {
   return <article className="history-market">
     <h3>{marketTypeLabel(market.marketType)}</h3>
@@ -68,7 +83,7 @@ export default function MatchTable({ items, children }: { items: HistoricalMatch
           const homeTeam = teamLabel(match.homeTeam)
           const awayTeam = teamLabel(match.awayTeam)
           return <Fragment key={match.id}><tr>
-            <td><time dateTime={match.kickoffAt}>{new Date(match.kickoffAt).toLocaleString('zh-CN')}</time></td>
+            <td><time dateTime={match.kickoffAt}>{kickoffText(match)}</time></td>
             <td>{competitionLabel(match.competitionCode, match.competitionName)}（{match.competitionCode}）<small>{match.season}</small></td>
             <th scope="row">{`${homeTeam} ${score(match.homeScore, match.awayScore)} ${awayTeam}`}</th>
             <td>{score(match.halfTimeHomeScore, match.halfTimeAwayScore)}</td>

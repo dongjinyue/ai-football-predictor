@@ -228,6 +228,7 @@ class HistoricalMatchResponse(BaseModel):
     competition_name: str
     season: str
     kickoff_at: datetime
+    kickoff_time_precision: Literal["exact", "date_only"] = "exact"
     home_team: str
     away_team: str
     half_time_home_score: int | None
@@ -515,6 +516,7 @@ def _historical_match_response(match: HistoricalMatchView) -> HistoricalMatchRes
         competition_name=match.competition_name,
         season=match.season,
         kickoff_at=match.kickoff_at,
+        kickoff_time_precision=getattr(match, "kickoff_time_precision", "exact"),
         home_team=match.home_team,
         away_team=match.away_team,
         half_time_home_score=match.half_time_home_score,

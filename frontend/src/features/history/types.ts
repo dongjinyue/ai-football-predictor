@@ -35,6 +35,8 @@ export interface HistoricalMatch {
   season: string
   /** 保留后端 ISO（国际标准化组织）时间字符串，显示时再按本地时区格式化。 */
   kickoffAt: string
+  /** 体彩历史列表可能只有比赛日期，不能把排序用的中午时间当成真实开球时间。 */
+  kickoffTimePrecision: 'exact' | 'date_only'
   homeTeam: string
   awayTeam: string
   halfTimeHomeScore: number | null

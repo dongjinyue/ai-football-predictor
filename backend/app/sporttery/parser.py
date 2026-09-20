@@ -49,19 +49,30 @@ class SportteryParseError(ValueError):
 
 
 def parse_match_page(payload: dict[str, Any]) -> MatchPageRecord:
-    """解析比赛列表页；身份字段无效时拒绝整页，防止错误关联奖金。"""
+    """解析比赛列表页；隔离明确的异常对阵，其余身份错误仍拒绝整页。"""
     value = _object(payload.get("value"), "invalid_value")
     raw_matches = value.get("matchResult")
     if not isinstance(raw_matches, list):
         raise SportteryParseError("invalid_match_result")
-    matches = tuple(_parse_match(_object(item, "invalid_match")) for item in raw_matches)
+    matches: list[SportteryMatch] = []
+    rejected_matches = 0
+    for item in raw_matches:
+        try:
+            matches.append(_parse_match(_object(item, "invalid_match")))
+        except SportteryParseError as error:
+            # 主客队相同无法形成合法训练样本，但不影响同一页其他独立比赛。
+            if str(error) != "home_away_same":
+                raise
+            rejected_matches += 1
     page_no = _positive_int(value.get("pageNo"), "invalid_page_no")
     page_size = _positive_int(value.get("pageSize"), "invalid_page_size")
     pages = _nonnegative_int(value.get("pages"), "invalid_pages")
     total = _nonnegative_int(value.get("total"), "invalid_total")
     if page_no > max(pages, 1):
         raise SportteryParseError("page_out_of_range")
-    return MatchPageRecord(page_no, page_size, pages, total, matches)
+    return MatchPageRecord(
+        page_no, page_size, pages, total, tuple(matches), rejected_matches
+    )
 
 
 def parse_fixed_bonus(payload: dict[str, Any]) -> FixedBonusRecord:
@@ -232,7 +243,7 @@ def _date(value: Any) -> date:
 
 def _optional_score(value: Any) -> tuple[int | None, int | None]:
     text = str(value or "").strip()
-    if not text:
+    if not text or text == "-1:-1":
         return None, None
     match = _SCORE.fullmatch(text)
     if match is None:

@@ -102,6 +102,27 @@ def test_resume_uses_checkpoint_and_does_not_repeat_network_requests(tmp_path: P
     assert report.completed_bonus == 2
 
 
+def test_resume_replays_cached_pages_into_idempotent_repository(tmp_path: Path) -> None:
+    """数据库映射升级后，已完成页应从缓存重放，而不重新访问来源。"""
+    first_client = FakeClient()
+    _service(tmp_path, first_client).collect_range(date(2015, 1, 1), date(2015, 1, 3))
+    second_client = FakeClient()
+    service = _service(tmp_path, second_client)
+    calls = 0
+    original = service.repository.import_match_page
+
+    def recording_import(page, raw):
+        nonlocal calls
+        calls += 1
+        original(page, raw)
+
+    service.repository.import_match_page = recording_import
+    service.collect_range(date(2015, 1, 1), date(2015, 1, 3), resume=True)
+
+    assert second_client.match_calls == []
+    assert calls == 2
+
+
 def test_valid_raw_pages_are_reused_when_crash_preceded_checkpoint(tmp_path: Path) -> None:
     """原始文件已落盘但检查点未写入时，恢复过程不能重复访问列表接口。"""
     client = FakeClient()

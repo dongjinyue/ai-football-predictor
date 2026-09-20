@@ -111,8 +111,9 @@ class SportteryCollectionService:
                             )
                     page = parse_match_page(stored.data)
                     pages = page.pages
+                    # 即使检查点已完成也重放幂等写入，便于数据库迁移后从原始证据补齐新映射。
+                    self.repository.import_match_page(page, stored)
                     if page_key not in checkpoint.completed_pages:
-                        self.repository.import_match_page(page, stored)
                         checkpoint = replace(
                             checkpoint,
                             completed_pages=(*checkpoint.completed_pages, page_key),
@@ -123,7 +124,12 @@ class SportteryCollectionService:
                         if match.match_id in seen:
                             duplicate_rows += 1
                         seen.add(match.match_id)
-                    self.progress({"event": "list_page", "key": page_key, "pages": pages})
+                    self.progress({
+                        "event": "list_page",
+                        "key": page_key,
+                        "pages": pages,
+                        "rejected_matches": page.rejected_matches,
+                    })
                     page_no += 1
                 except SportterySourceError as error:
                     return self._stopped_report(
