@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
+from pathlib import Path
 
 import pytest
 
@@ -79,6 +80,29 @@ def test_checkpoint_round_trip_is_atomic_and_sorted(tmp_path) -> None:
     assert list(tmp_path.rglob("*.part")) == []
 
 
+def test_atomic_write_retries_a_transient_windows_replace_denial(
+    tmp_path, monkeypatch
+) -> None:
+    """索引器短暂占用目标文件时应重试，不能让全年任务退出。"""
+    original_replace = Path.replace
+    attempts = 0
+
+    def flaky_replace(path: Path, target: Path):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise PermissionError("temporarily locked")
+        return original_replace(path, target)
+
+    monkeypatch.setattr(Path, "replace", flaky_replace)
+
+    CheckpointStore(tmp_path).save(CollectionCheckpoint(year=2015))
+
+    assert attempts == 2
+    assert CheckpointStore(tmp_path).load(2015).year == 2015
+    assert list(tmp_path.rglob("*.part")) == []
+
+
 def test_checkpoint_corruption_is_not_silently_reset(tmp_path) -> None:
     path = tmp_path / "checkpoints" / "2015.json"
     path.parent.mkdir(parents=True)
@@ -86,4 +110,3 @@ def test_checkpoint_corruption_is_not_silently_reset(tmp_path) -> None:
 
     with pytest.raises(StorageError, match="invalid_checkpoint"):
         CheckpointStore(tmp_path).load(2015)
-

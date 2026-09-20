@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from hashlib import sha256
@@ -174,8 +175,15 @@ def _atomic_json_write(path: Path, document: dict[str, Any]) -> None:
             json.dumps(document, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
             encoding="utf-8",
         )
-        part.replace(path)
+        for attempt in range(5):
+            try:
+                part.replace(path)
+                break
+            except PermissionError:
+                # Windows 索引器或杀毒软件可能短暂占用目标文件，退避后重试原子替换。
+                if attempt == 4:
+                    raise
+                time.sleep(0.05 * (2**attempt))
     finally:
         if part.exists():
             part.unlink()
-
