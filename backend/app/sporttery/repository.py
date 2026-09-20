@@ -10,7 +10,12 @@ from zoneinfo import ZoneInfo
 
 import duckdb
 
-from app.sporttery.models import BonusSnapshot, FixedBonusRecord, MatchPageRecord
+from app.sporttery.models import (
+    BonusSnapshot,
+    FixedBonusRecord,
+    MatchPageRecord,
+    SportteryMatch,
+)
 from app.sporttery.storage import StoredResponse
 from app.storage import initialize_database
 
@@ -67,13 +72,19 @@ class SportteryRepository:
                     existing_core_ids = set()
                     existing_match_ids = set()
 
-                for match in page.matches:
-                    core_match_id = core_ids[match.match_id]
-                    if core_match_id not in existing_core_ids:
-                        self._sync_core_match(connection, match, raw)
-                    if match.match_id in existing_match_ids:
-                        continue
-                    connection.execute(
+                missing_core = [
+                    match for match in page.matches
+                    if core_ids[match.match_id] not in existing_core_ids
+                ]
+                self._sync_core_matches(connection, missing_core, raw)
+
+                missing_matches = [
+                    match for match in page.matches
+                    if match.match_id not in existing_match_ids
+                ]
+                if missing_matches:
+                    _insert_rows(
+                        connection,
                         """
                         INSERT OR IGNORE INTO sporttery_matches (
                             match_id, core_match_id, match_date, match_number, match_number_label,
@@ -83,17 +94,23 @@ class SportteryRepository:
                             half_time_home_score, half_time_away_score,
                             home_score, away_score, result, handicap,
                             result_status, pool_status, raw_sha256
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES
                         """,
+                        "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         [
-                            match.match_id, core_match_id, match.match_date, match.match_number,
-                            match.match_number_label, match.league_id, match.league_name,
-                            match.league_abbreviation, match.home_team_id, match.home_team,
-                            match.home_team_full_name, match.away_team_id, match.away_team,
-                            match.away_team_full_name, match.half_time_home_score,
-                            match.half_time_away_score, match.home_score, match.away_score,
-                            match.result, match.handicap, match.result_status,
-                            match.pool_status, raw.sha256,
+                            [
+                                match.match_id, core_ids[match.match_id], match.match_date,
+                                match.match_number, match.match_number_label, match.league_id,
+                                match.league_name, match.league_abbreviation,
+                                match.home_team_id, match.home_team,
+                                match.home_team_full_name, match.away_team_id,
+                                match.away_team, match.away_team_full_name,
+                                match.half_time_home_score, match.half_time_away_score,
+                                match.home_score, match.away_score, match.result,
+                                match.handicap, match.result_status, match.pool_status,
+                                raw.sha256,
+                            ]
+                            for match in missing_matches
                         ],
                     )
                 self._insert_request(connection, "match_list", raw)
@@ -112,40 +129,60 @@ class SportteryRepository:
                 ).fetchone()
                 if exists is None:
                     raise ValueError("unknown_match")
+                snapshot_rows: list[list[object]] = []
+                outcome_rows: list[list[object]] = []
                 for snapshot in record.snapshots:
                     line_key = "none" if snapshot.line is None else format(snapshot.line, "g")
                     snapshot_id = _stable_id(
                         "snapshot", str(record.match_id), snapshot.market_type,
                         line_key, snapshot.captured_at.isoformat(),
                     )
-                    connection.execute(
+                    snapshot_rows.append(
+                        [snapshot_id, record.match_id, snapshot.market_type, snapshot.line,
+                         line_key, snapshot.captured_at, raw.sha256]
+                    )
+                    for outcome_code, odds in snapshot.outcomes:
+                        outcome_id = _stable_id("outcome", snapshot_id, outcome_code)
+                        outcome_rows.append(
+                            [outcome_id, snapshot_id, outcome_code, odds]
+                        )
+
+                if snapshot_rows:
+                    _insert_rows(
+                        connection,
                         """
                         INSERT OR IGNORE INTO sporttery_bonus_snapshots
                             (id, match_id, market_type, handicap, handicap_key,
                              captured_at, raw_sha256)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        VALUES
                         """,
-                        [snapshot_id, record.match_id, snapshot.market_type, snapshot.line,
-                         line_key, snapshot.captured_at, raw.sha256],
+                        "(?, ?, ?, ?, ?, ?, ?)",
+                        snapshot_rows,
                     )
-                    for outcome_code, odds in snapshot.outcomes:
-                        outcome_id = _stable_id("outcome", snapshot_id, outcome_code)
-                        connection.execute(
-                            """
-                            INSERT OR IGNORE INTO sporttery_bonus_outcomes
-                                (id, snapshot_id, outcome_code, odds_value)
-                            VALUES (?, ?, ?, ?)
-                            """,
-                            [outcome_id, snapshot_id, outcome_code, odds],
-                        )
-                for pool_code, is_single in record.single_pools:
-                    connection.execute(
+                if outcome_rows:
+                    _insert_rows(
+                        connection,
+                        """
+                        INSERT OR IGNORE INTO sporttery_bonus_outcomes
+                            (id, snapshot_id, outcome_code, odds_value)
+                        VALUES
+                        """,
+                        "(?, ?, ?, ?)",
+                        outcome_rows,
+                    )
+                if record.single_pools:
+                    _insert_rows(
+                        connection,
                         """
                         INSERT OR IGNORE INTO sporttery_single_pools
                             (match_id, pool_code, is_single, raw_sha256)
-                        VALUES (?, ?, ?, ?)
+                        VALUES
                         """,
-                        [record.match_id, pool_code, is_single, raw.sha256],
+                        "(?, ?, ?, ?)",
+                        [
+                            [record.match_id, pool_code, is_single, raw.sha256]
+                            for pool_code, is_single in record.single_pools
+                        ],
                     )
                 self._sync_core_markets(connection, record)
                 self._insert_request(connection, "fixed_bonus", raw)
@@ -212,66 +249,94 @@ class SportteryRepository:
         )
 
     @staticmethod
-    def _sync_core_match(connection, match, raw: StoredResponse) -> None:
-        """把体彩比赛同步到现有历史浏览表，并明确标记日期精度。"""
-        competition_code = (
-            f"JC{match.league_id}"
-            if match.league_id > 0
-            else f"JC0-{_stable_id('league-name', match.league_name)[:8]}"
-        )
-        competition_id = _stable_id("core-competition", competition_code)
-        connection.execute(
+    def _sync_core_matches(
+        connection,
+        matches: list[SportteryMatch],
+        raw: StoredResponse,
+    ) -> None:
+        """按页批量同步历史浏览表，并明确标记只有比赛日期。"""
+        if not matches:
+            return
+
+        competitions: dict[str, list[object]] = {}
+        teams: dict[int, list[object]] = {}
+        aliases: dict[int, list[object]] = {}
+        match_rows: list[list[object]] = []
+        for match in matches:
+            competition_code = (
+                f"JC{match.league_id}"
+                if match.league_id > 0
+                else f"JC0-{_stable_id('league-name', match.league_name)[:8]}"
+            )
+            competition_id = _stable_id("core-competition", competition_code)
+            competitions[competition_code] = [
+                competition_id, match.league_name, competition_code,
+            ]
+            team_rows = (
+                (match.home_team_id, match.home_team_full_name or match.home_team),
+                (match.away_team_id, match.away_team_full_name or match.away_team),
+            )
+            core_team_ids: list[str] = []
+            for source_team_id, name in team_rows:
+                team_id = _stable_id("core-team", str(source_team_id))
+                alias_id = _stable_id("core-team-alias", str(source_team_id))
+                teams[source_team_id] = [team_id, name]
+                aliases[source_team_id] = [
+                    alias_id, team_id, name, f"sporttery:{source_team_id}",
+                ]
+                core_team_ids.append(team_id)
+
+            # 中午只作为不跨日期的排序锚点，并非真实开球时刻。
+            kickoff_anchor = datetime.combine(
+                match.match_date, time(12, 0), tzinfo=ZoneInfo("Asia/Shanghai")
+            ).astimezone(ZoneInfo("UTC"))
+            status = "finished" if match.home_score is not None else "cancelled"
+            match_rows.append([
+                _stable_id("core-match", str(match.match_id)), competition_id,
+                str(match.match_date.year), kickoff_anchor, core_team_ids[0],
+                core_team_ids[1], match.home_score, match.away_score, status,
+                str(match.match_id), raw.fetched_at, match.half_time_home_score,
+                match.half_time_away_score,
+            ])
+
+        _insert_rows(
+            connection,
             """
             INSERT OR IGNORE INTO competitions
                 (id, name_zh, source, source_competition_id)
-            VALUES (?, ?, 'sporttery', ?)
+            VALUES
             """,
-            [competition_id, match.league_name, competition_code],
+            "(?, ?, 'sporttery', ?)",
+            list(competitions.values()),
         )
-
-        team_rows = (
-            (match.home_team_id, match.home_team_full_name or match.home_team),
-            (match.away_team_id, match.away_team_full_name or match.away_team),
+        _insert_rows(
+            connection,
+            "INSERT OR IGNORE INTO teams (id, name_zh) VALUES",
+            "(?, ?)",
+            list(teams.values()),
         )
-        core_team_ids: list[str] = []
-        for source_team_id, name in team_rows:
-            team_id = _stable_id("core-team", str(source_team_id))
-            alias_id = _stable_id("core-team-alias", str(source_team_id))
-            connection.execute(
-                "INSERT OR IGNORE INTO teams (id, name_zh) VALUES (?, ?)",
-                [team_id, name],
-            )
-            connection.execute(
-                """
-                INSERT OR IGNORE INTO team_aliases
-                    (id, team_id, source, alias, normalized_alias)
-                VALUES (?, ?, 'sporttery', ?, ?)
-                """,
-                [alias_id, team_id, name, f"sporttery:{source_team_id}"],
-            )
-            core_team_ids.append(team_id)
-
-        core_match_id = _stable_id("core-match", str(match.match_id))
-        # 中午只作为不跨日期的排序锚点；kickoff_time_precision 明确说明它不是开球时刻。
-        kickoff_anchor = datetime.combine(
-            match.match_date, time(12, 0), tzinfo=ZoneInfo("Asia/Shanghai")
-        ).astimezone(ZoneInfo("UTC"))
-        status = "finished" if match.home_score is not None else "cancelled"
-        connection.execute(
+        _insert_rows(
+            connection,
+            """
+            INSERT OR IGNORE INTO team_aliases
+                (id, team_id, source, alias, normalized_alias)
+            VALUES
+            """,
+            "(?, ?, 'sporttery', ?, ?)",
+            list(aliases.values()),
+        )
+        _insert_rows(
+            connection,
             """
             INSERT OR IGNORE INTO matches (
                 id, competition_id, season, kickoff_at, home_team_id, away_team_id,
                 home_score, away_score, status, source, source_match_id,
                 available_at, half_time_home_score, half_time_away_score,
                 kickoff_time_precision
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'sporttery', ?, ?, ?, ?, 'date_only')
+            ) VALUES
             """,
-            [
-                core_match_id, competition_id, str(match.match_date.year), kickoff_anchor,
-                core_team_ids[0], core_team_ids[1], match.home_score, match.away_score,
-                status, str(match.match_id), raw.fetched_at,
-                match.half_time_home_score, match.half_time_away_score,
-            ],
+            "(?, ?, ?, ?, ?, ?, ?, ?, ?, 'sporttery', ?, ?, ?, ?, 'date_only')",
+            match_rows,
         )
 
     @staticmethod
@@ -286,6 +351,8 @@ class SportteryRepository:
             if existing is None or snapshot.captured_at > existing.captured_at:
                 latest[key] = snapshot
 
+        snapshot_rows: list[list[object]] = []
+        outcome_rows: list[list[object]] = []
         for (market_type, _line_key), snapshot in latest.items():
             core_line_key = "none" if snapshot.line is None else f"{snapshot.line:.2f}"
             snapshot_id = _stable_id(
@@ -293,31 +360,53 @@ class SportteryRepository:
                 snapshot.captured_at.isoformat(),
             )
             odds = dict(snapshot.outcomes)
-            connection.execute(
+            snapshot_rows.append(
+                [
+                    snapshot_id, core_match_id, market_type, snapshot.line, core_line_key,
+                    odds.get("home"), odds.get("draw"), odds.get("away"),
+                    snapshot.captured_at, snapshot.captured_at,
+                ]
+            )
+            for outcome_code, odds_value in snapshot.outcomes:
+                outcome_id = _stable_id("core-outcome", snapshot_id, outcome_code)
+                outcome_rows.append(
+                    [outcome_id, snapshot_id, outcome_code, odds_value]
+                )
+
+        if snapshot_rows:
+            _insert_rows(
+                connection,
                 """
                 INSERT OR IGNORE INTO market_snapshots (
                     id, match_id, provider, source, market_type, handicap,
                     handicap_key, home_value, draw_value, away_value,
                     captured_at, available_at, stage, time_precision
-                ) VALUES (?, ?, 'china_sports_lottery', 'sporttery', ?, ?, ?, ?, ?, ?, ?, ?, 'closing', 'exact')
+                ) VALUES
                 """,
-                [
-                    snapshot_id, core_match_id, market_type, snapshot.line, core_line_key,
-                    odds.get("home"), odds.get("draw"), odds.get("away"),
-                    snapshot.captured_at, snapshot.captured_at,
-                ],
+                "(?, ?, 'china_sports_lottery', 'sporttery', ?, ?, ?, ?, ?, ?, ?, ?, 'closing', 'exact')",
+                snapshot_rows,
             )
-            for outcome_code, odds_value in snapshot.outcomes:
-                outcome_id = _stable_id("core-outcome", snapshot_id, outcome_code)
-                connection.execute(
-                    """
-                    INSERT OR IGNORE INTO market_outcomes
-                        (id, snapshot_id, outcome_code, odds_value, source_field)
-                    VALUES (?, ?, ?, ?, 'sporttery.fixed_bonus')
-                    """,
-                    [outcome_id, snapshot_id, outcome_code, odds_value],
-                )
+        if outcome_rows:
+            _insert_rows(
+                connection,
+                """
+                INSERT OR IGNORE INTO market_outcomes
+                    (id, snapshot_id, outcome_code, odds_value, source_field)
+                VALUES
+                """,
+                "(?, ?, ?, ?, 'sporttery.fixed_bonus')",
+                outcome_rows,
+            )
 
 
 def _stable_id(kind: str, *parts: str) -> str:
     return str(uuid.uuid5(_NAMESPACE, ":".join((kind, *parts))))
+
+
+def _insert_rows(connection, statement: str, row_template: str, rows: list[list[object]]) -> None:
+    """用一条多行 VALUES 语句写入，避免 executemany 逐行往返。"""
+    if not rows:
+        return
+    values_sql = ", ".join(row_template for _ in rows)
+    parameters = [value for row in rows for value in row]
+    connection.execute(f"{statement} {values_sql}", parameters)
