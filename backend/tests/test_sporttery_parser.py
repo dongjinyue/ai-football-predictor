@@ -103,3 +103,50 @@ def test_invalid_match_identity_rejects_the_whole_payload() -> None:
     with pytest.raises(SportteryParseError, match="invalid_match_id"):
         parse_match_page(payload)
 
+
+def test_refunded_invalid_match_keeps_identity_without_training_label() -> None:
+    """旧数据中的“无效场次”应保留审计身份，但不能伪造比分和赛果。"""
+    payload = _fixture("sporttery_match_page.json")
+    match = payload["value"]["matchResult"][0]
+    match.update({
+        "sectionsNo1": "",
+        "sectionsNo999": "无效场次",
+        "winFlag": "",
+        "poolStatus": "Refund",
+    })
+
+    parsed = parse_match_page(payload).matches[0]
+
+    assert (parsed.home_score, parsed.away_score, parsed.result) == (None, None, None)
+    assert parsed.pool_status == "Refund"
+
+
+def test_legacy_unmapped_league_id_zero_is_preserved() -> None:
+    """旧接口以 leagueId=0 表示未映射联赛，不能因此丢弃有效比赛和奖金。"""
+    page_payload = _fixture("sporttery_match_page.json")
+    page_payload["value"]["matchResult"][0]["leagueId"] = 0
+    bonus_payload = _fixture("sporttery_fixed_bonus.json")
+    bonus_payload["value"]["oddsHistory"]["leagueId"] = 0
+
+    match = parse_match_page(page_payload).matches[0]
+    bonus = parse_fixed_bonus(bonus_payload)
+
+    assert match.league_id == 0
+    assert bonus.league_id == 0
+
+
+@pytest.mark.parametrize("marker", ["无效场次", "取消"])
+def test_official_invalid_result_markers_do_not_create_labels(marker: str) -> None:
+    """官方无效或取消标记没有数值比分，必须排除训练标签但保留记录。"""
+    payload = _fixture("sporttery_match_page.json")
+    match = payload["value"]["matchResult"][0]
+    match.update({
+        "sectionsNo1": "",
+        "sectionsNo999": marker,
+        "winFlag": "",
+        "poolStatus": "" if marker == "取消" else "Refund",
+    })
+
+    parsed = parse_match_page(payload).matches[0]
+
+    assert (parsed.home_score, parsed.away_score, parsed.result) == (None, None, None)

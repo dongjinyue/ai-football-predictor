@@ -69,7 +69,7 @@ def parse_fixed_bonus(payload: dict[str, Any]) -> FixedBonusRecord:
     value = _object(payload.get("value"), "invalid_value")
     history = _object(value.get("oddsHistory"), "invalid_odds_history")
     match_id = _positive_int(history.get("matchId"), "invalid_match_id")
-    league_id = _positive_int(history.get("leagueId"), "invalid_league_id")
+    league_id = _nonnegative_int(history.get("leagueId"), "invalid_league_id")
     home_team_id = _positive_int(history.get("homeTeamId"), "invalid_home_team_id")
     away_team_id = _positive_int(history.get("awayTeamId"), "invalid_away_team_id")
     if home_team_id == away_team_id:
@@ -139,8 +139,16 @@ def _parse_match(row: dict[str, Any]) -> SportteryMatch:
     away_team = _required_text(row, "awayTeam")
     if home_team_id == away_team_id or home_team == away_team:
         raise SportteryParseError("home_away_same")
+    pool_status = str(row.get("poolStatus") or "").strip()
     half_home, half_away = _optional_score(row.get("sectionsNo1"))
-    home_score, away_score = _optional_score(row.get("sectionsNo999"))
+    raw_full_time = str(row.get("sectionsNo999") or "").strip()
+    # 旧数据会把退款场次写成“无效场次”；保留比赛用于审计，但不生成训练标签。
+    if raw_full_time == "取消" or (
+        pool_status.lower() == "refund" and raw_full_time == "无效场次"
+    ):
+        home_score, away_score = None, None
+    else:
+        home_score, away_score = _optional_score(raw_full_time)
     raw_result = str(row.get("winFlag") or "").strip().upper()
     result = {"H": "home", "D": "draw", "A": "away", "": None}.get(raw_result)
     if raw_result and result is None:
@@ -154,7 +162,7 @@ def _parse_match(row: dict[str, Any]) -> SportteryMatch:
         match_date=_date(row.get("matchDate")),
         match_number=_required_text(row, "matchNum"),
         match_number_label=_required_text(row, "matchNumStr"),
-        league_id=_positive_int(row.get("leagueId"), "invalid_league_id"),
+        league_id=_nonnegative_int(row.get("leagueId"), "invalid_league_id"),
         league_name=_required_text(row, "leagueName"),
         league_abbreviation=_required_text(row, "leagueNameAbbr"),
         home_team_id=home_team_id,
@@ -170,7 +178,7 @@ def _parse_match(row: dict[str, Any]) -> SportteryMatch:
         result=result,
         handicap=_optional_float(row.get("goalLine")),
         result_status=str(row.get("matchResultStatus") or "").strip(),
-        pool_status=str(row.get("poolStatus") or "").strip(),
+        pool_status=pool_status,
     )
 
 
@@ -279,4 +287,3 @@ def _optional_float(value: Any) -> float | None:
     if not math.isfinite(number):
         raise SportteryParseError("invalid_number")
     return number
-

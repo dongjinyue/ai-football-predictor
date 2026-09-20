@@ -102,6 +102,29 @@ def test_resume_uses_checkpoint_and_does_not_repeat_network_requests(tmp_path: P
     assert report.completed_bonus == 2
 
 
+def test_valid_raw_pages_are_reused_when_crash_preceded_checkpoint(tmp_path: Path) -> None:
+    """原始文件已落盘但检查点未写入时，恢复过程不能重复访问列表接口。"""
+    client = FakeClient()
+    raw = RawResponseStore(tmp_path / "raw")
+    for page_no in (1, 2):
+        payload = deepcopy(_json("sporttery_match_page.json"))
+        payload["value"]["pageNo"] = page_no
+        raw.write(
+            "match_lists",
+            2015,
+            f"2015-01-01_2015-01-03/page-{page_no}",
+            _http(payload, f"page-{page_no}"),
+        )
+
+    report = _service(tmp_path, client).collect_range(
+        date(2015, 1, 1), date(2015, 1, 3), resume=True
+    )
+
+    assert client.match_calls == []
+    assert client.bonus_calls == [62373, 62374]
+    assert report.completed_pages == 2
+
+
 def test_one_missing_bonus_is_recorded_and_remaining_matches_continue(tmp_path: Path) -> None:
     client = FakeClient(fail_bonus={62373: SourceBusinessError("business_missing")})
 
@@ -127,6 +150,23 @@ def test_http_567_stops_and_preserves_checkpoint_for_resume(tmp_path: Path) -> N
     assert checkpoint.stopped_reason == "http_567"
 
 
+def test_unknown_list_shape_stops_with_parse_code_and_keeps_raw_page(tmp_path: Path) -> None:
+    class InvalidScoreClient(FakeClient):
+        def fetch_match_page(self, begin: date, end: date, page_no: int, page_size: int):
+            payload = deepcopy(_json("sporttery_match_page.json"))
+            payload["value"]["pages"] = 1
+            payload["value"]["matchResult"][0]["sectionsNo999"] = "未知状态"
+            return _http(payload, "invalid-page")
+
+    report = _service(tmp_path, InvalidScoreClient()).collect_range(
+        date(2015, 1, 1), date(2015, 1, 3)
+    )
+
+    assert report.status == "failed"
+    assert report.stopped_reason == "parse_invalid_score"
+    assert (tmp_path / "raw/match_lists/2015/2015-01-01_2015-01-03/page-1.json").exists()
+
+
 def test_cli_parses_collection_controls_and_dry_run() -> None:
     args = parse_args([
         "collect", "--start", "2015-01-01", "--end", "2015-12-31",
@@ -138,4 +178,3 @@ def test_cli_parses_collection_controls_and_dry_run() -> None:
     assert (args.delay_min, args.delay_max) == (3.0, 5.0)
     assert args.resume is True
     assert args.dry_run is True
-

@@ -14,7 +14,7 @@ from app.sporttery.client import (
     SportteryClient,
     SportterySourceError,
 )
-from app.sporttery.parser import parse_fixed_bonus, parse_match_page
+from app.sporttery.parser import SportteryParseError, parse_fixed_bonus, parse_match_page
 from app.sporttery.repository import SportteryRepository
 from app.sporttery.storage import (
     CheckpointStore,
@@ -101,11 +101,14 @@ class SportteryCollectionService:
                         if stored is None:
                             raise StorageError("checkpoint_raw_missing")
                     else:
-                        self._pace()
-                        payload = self.client.fetch_match_page(begin, end, page_no, 30)
-                        stored = self.raw_store.write(
-                            "match_lists", start_date.year, page_key, payload
-                        )
+                        # 原始文件可能已落盘而进程在写检查点前退出；先复用证据，避免重复请求。
+                        stored = self.raw_store.load("match_lists", start_date.year, page_key)
+                        if stored is None:
+                            self._pace()
+                            payload = self.client.fetch_match_page(begin, end, page_no, 30)
+                            stored = self.raw_store.write(
+                                "match_lists", start_date.year, page_key, payload
+                            )
                     page = parse_match_page(stored.data)
                     pages = page.pages
                     if page_key not in checkpoint.completed_pages:
@@ -127,6 +130,11 @@ class SportteryCollectionService:
                         checkpoint, start_date, end_date, duplicate_rows,
                         "blocked" if isinstance(error, BlockedBySourceError) else "failed",
                         error.code,
+                    )
+                except SportteryParseError as error:
+                    return self._stopped_report(
+                        checkpoint, start_date, end_date, duplicate_rows,
+                        "failed", f"parse_{error}",
                     )
 
         # 列表阶段可能由多页重复返回同场；检查点保存排序后的唯一 ID。
@@ -160,11 +168,12 @@ class SportteryCollectionService:
                 return self._stopped_report(
                     checkpoint, start_date, end_date, duplicate_rows, "blocked", error.code
                 )
-            except (SourceBusinessError, SportterySourceError) as error:
+            except (SourceBusinessError, SportterySourceError, SportteryParseError) as error:
                 failed.add(match_id)
                 checkpoint = replace(checkpoint, failed_bonus_ids=tuple(sorted(failed)))
                 self.checkpoint_store.save(checkpoint)
-                self.progress({"event": "fixed_bonus", "match_id": match_id, "status": "failed", "code": error.code})
+                code = error.code if isinstance(error, SportterySourceError) else f"parse_{error}"
+                self.progress({"event": "fixed_bonus", "match_id": match_id, "status": "failed", "code": code})
 
         status = "completed_with_errors" if failed else "completed"
         return _report(checkpoint, start_date, end_date, duplicate_rows, status, None)
@@ -224,4 +233,3 @@ def _report(
         failed_bonus=len(checkpoint.failed_bonus_ids),
         stopped_reason=reason,
     )
-
