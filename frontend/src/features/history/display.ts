@@ -128,6 +128,10 @@ const outcomeNames: Record<string, string> = {
   away: '客胜',
   over_2_5: '大于 2.5 球',
   under_2_5: '小于 2.5 球',
+  other_home: '胜其他',
+  other_draw: '平其他',
+  other_away: '负其他',
+  '7_plus': '7+',
 }
 
 const sourceNames: Record<string, string> = {
@@ -187,8 +191,48 @@ export function marketTypeLabel(value: string): string {
   return marketTypeNames[value] ?? value
 }
 
+export const marketHistoryLabels: Record<string, string> = {
+  match_result: '胜平负固定奖金',
+  handicap_result: '让球胜平负固定奖金',
+  correct_score: '比分固定奖金',
+  total_goals: '总进球固定奖金',
+  half_full: '半全场胜平负固定奖金',
+}
+
+/** 把体彩内部结果代码转换成适合表头阅读的短标签。 */
+export function historyOutcomeLabel(code: string): string {
+  const labels: Record<string, string> = {
+    home: '胜',
+    draw: '平',
+    away: '负',
+    other_home: '胜其他',
+    other_draw: '平其他',
+    other_away: '负其他',
+    '7_plus': '7+',
+    home_home: '胜胜',
+    home_draw: '胜平',
+    home_away: '胜负',
+    draw_home: '平胜',
+    draw_draw: '平平',
+    draw_away: '平负',
+    away_home: '负胜',
+    away_draw: '负平',
+    away_away: '负负',
+  }
+  return labels[code] ?? (/^\d+_\d+$/.test(code) ? code.replace('_', ':') : code)
+}
+
 export function outcomeLabel(value: string): string {
-  return outcomeNames[value] ?? value
+  const known = outcomeNames[value]
+  if (known) return known
+
+  // 体彩比分使用 0_0，半全场使用 away_away；转换成用户熟悉的赛果写法。
+  if (/^\d+_\d+$/.test(value)) return value.replace('_', ':')
+  const resultParts = value.split('_')
+  if (resultParts.length === 2 && resultParts.every((part) => part in { home: 1, draw: 1, away: 1 })) {
+    return resultParts.map((part) => ({ home: '胜', draw: '平', away: '负' })[part]).join(' / ')
+  }
+  return value
 }
 
 export function sourceLabel(value: string): string {
