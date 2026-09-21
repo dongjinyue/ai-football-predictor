@@ -157,7 +157,8 @@ def test_official_invalid_result_markers_do_not_create_labels(marker: str) -> No
         "sectionsNo1": "",
         "sectionsNo999": marker,
         "winFlag": "",
-        "poolStatus": "" if marker == "取消" else "Refund",
+        # 2015 旧记录偶发遗漏 Refund 状态，结果标记本身仍然明确表示无有效赛果。
+        "poolStatus": "",
     })
 
     parsed = parse_match_page(payload).matches[0]

@@ -88,6 +88,7 @@ class SportteryCollectionService:
             raise ValueError("existing_checkpoint_use_resume")
         checkpoint = replace(checkpoint, stopped_reason=None)
         seen = set(checkpoint.match_ids)
+        processed_bonus_ids: set[int] = set()
         duplicate_rows = 0
 
         for begin, end in _date_windows(start_date, end_date, window_days):
@@ -124,6 +125,11 @@ class SportteryCollectionService:
                         if match.match_id in seen:
                             duplicate_rows += 1
                         seen.add(match.match_id)
+                        if match.match_id not in processed_bonus_ids:
+                            checkpoint = self._collect_fixed_bonus(
+                                checkpoint, match.match_id, start_date.year
+                            )
+                            processed_bonus_ids.add(match.match_id)
                     self.progress({
                         "event": "list_page",
                         "key": page_key,
@@ -146,46 +152,55 @@ class SportteryCollectionService:
         # 列表阶段可能由多页重复返回同场；检查点保存排序后的唯一 ID。
         checkpoint = replace(checkpoint, match_ids=tuple(sorted(seen)))
         self.checkpoint_store.save(checkpoint)
+        for match_id in checkpoint.match_ids:
+            if match_id not in processed_bonus_ids:
+                try:
+                    checkpoint = self._collect_fixed_bonus(
+                        checkpoint, match_id, start_date.year
+                    )
+                except BlockedBySourceError as error:
+                    return self._stopped_report(
+                        checkpoint, start_date, end_date, duplicate_rows, "blocked", error.code
+                    )
+
+        status = "completed_with_errors" if checkpoint.failed_bonus_ids else "completed"
+        return _report(checkpoint, start_date, end_date, duplicate_rows, status, None)
+
+    def _collect_fixed_bonus(
+        self, checkpoint: CollectionCheckpoint, match_id: int, year: int
+    ) -> CollectionCheckpoint:
+        """抓取并立即写入单场赔率，使长时间列表采集也能逐步产出可见数据。"""
         completed = set(checkpoint.completed_bonus_ids)
         failed = set(checkpoint.failed_bonus_ids)
-        for match_id in checkpoint.match_ids:
-            try:
-                stored = self.raw_store.load("fixed_bonus", start_date.year, str(match_id))
-                if stored is None:
-                    self._pace()
-                    payload = self.client.fetch_fixed_bonus(match_id)
-                    stored = self.raw_store.write(
-                        "fixed_bonus", start_date.year, str(match_id), payload
-                    )
-                record = parse_fixed_bonus(stored.data)
-                self.repository.import_fixed_bonus(record, stored)
-                completed.add(match_id)
-                failed.discard(match_id)
-                checkpoint = replace(
-                    checkpoint,
-                    completed_bonus_ids=tuple(sorted(completed)),
-                    failed_bonus_ids=tuple(sorted(failed)),
-                )
-                self.checkpoint_store.save(checkpoint)
-                self.progress({"event": "fixed_bonus", "match_id": match_id, "status": "completed"})
-            except BlockedBySourceError as error:
-                return self._stopped_report(
-                    checkpoint, start_date, end_date, duplicate_rows, "blocked", error.code
-                )
-            except (SourceBusinessError, SportterySourceError, SportteryParseError) as error:
-                completed.discard(match_id)
-                failed.add(match_id)
-                checkpoint = replace(
-                    checkpoint,
-                    completed_bonus_ids=tuple(sorted(completed)),
-                    failed_bonus_ids=tuple(sorted(failed)),
-                )
-                self.checkpoint_store.save(checkpoint)
-                code = error.code if isinstance(error, SportterySourceError) else f"parse_{error}"
-                self.progress({"event": "fixed_bonus", "match_id": match_id, "status": "failed", "code": code})
-
-        status = "completed_with_errors" if failed else "completed"
-        return _report(checkpoint, start_date, end_date, duplicate_rows, status, None)
+        try:
+            stored = self.raw_store.load("fixed_bonus", year, str(match_id))
+            if stored is None:
+                self._pace()
+                payload = self.client.fetch_fixed_bonus(match_id)
+                stored = self.raw_store.write("fixed_bonus", year, str(match_id), payload)
+            record = parse_fixed_bonus(stored.data)
+            self.repository.import_fixed_bonus(record, stored)
+            completed.add(match_id)
+            failed.discard(match_id)
+            status_event = {"event": "fixed_bonus", "match_id": match_id, "status": "completed"}
+        except BlockedBySourceError:
+            raise
+        except (SourceBusinessError, SportterySourceError, SportteryParseError) as error:
+            completed.discard(match_id)
+            failed.add(match_id)
+            code = error.code if isinstance(error, SportterySourceError) else f"parse_{error}"
+            status_event = {
+                "event": "fixed_bonus", "match_id": match_id,
+                "status": "failed", "code": code,
+            }
+        checkpoint = replace(
+            checkpoint,
+            completed_bonus_ids=tuple(sorted(completed)),
+            failed_bonus_ids=tuple(sorted(failed)),
+        )
+        self.checkpoint_store.save(checkpoint)
+        self.progress(status_event)
+        return checkpoint
 
     def _pace(self) -> None:
         if self._network_requests:

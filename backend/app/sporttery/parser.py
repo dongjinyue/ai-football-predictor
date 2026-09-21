@@ -153,10 +153,8 @@ def _parse_match(row: dict[str, Any]) -> SportteryMatch:
     pool_status = str(row.get("poolStatus") or "").strip()
     half_home, half_away = _optional_score(row.get("sectionsNo1"))
     raw_full_time = str(row.get("sectionsNo999") or "").strip()
-    # 旧数据会把退款场次写成“无效场次”；保留比赛用于审计，但不生成训练标签。
-    if raw_full_time == "取消" or (
-        pool_status.lower() == "refund" and raw_full_time == "无效场次"
-    ):
+    # 旧数据偶尔遗漏 Refund 状态；官方结果标记本身足以判定该场没有训练标签。
+    if raw_full_time in {"取消", "无效场次"}:
         home_score, away_score = None, None
     else:
         home_score, away_score = _optional_score(raw_full_time)

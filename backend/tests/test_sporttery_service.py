@@ -36,8 +36,10 @@ class FakeClient:
         self.match_calls: list[tuple[date, date, int, int]] = []
         self.bonus_calls: list[int] = []
         self.fail_bonus = fail_bonus or {}
+        self.calls: list[str] = []
 
     def fetch_match_page(self, begin: date, end: date, page_no: int, page_size: int):
+        self.calls.append(f"list:{page_no}")
         self.match_calls.append((begin, end, page_no, page_size))
         payload = deepcopy(_json("sporttery_match_page.json"))
         payload["value"]["pageNo"] = page_no
@@ -45,6 +47,7 @@ class FakeClient:
         return _http(payload, f"page-{page_no}")
 
     def fetch_fixed_bonus(self, match_id: int):
+        self.calls.append(f"bonus:{match_id}")
         self.bonus_calls.append(match_id)
         if match_id in self.fail_bonus:
             raise self.fail_bonus[match_id]
@@ -85,6 +88,15 @@ def test_collect_follows_source_pages_deduplicates_matches_and_paces_requests(tm
     assert report.completed_bonus == 2
     assert report.failed_bonus == 0
     assert waits == [4.0, 4.0, 4.0]
+
+
+def test_collects_each_pages_bonus_before_requesting_the_next_list_page(tmp_path: Path) -> None:
+    """列表采集尚未完成时，也必须让已发现比赛的赔率立即落库。"""
+    client = FakeClient()
+
+    _service(tmp_path, client).collect_range(date(2015, 1, 1), date(2015, 1, 3))
+
+    assert client.calls[:3] == ["list:1", "bonus:62373", "bonus:62374"]
 
 
 def test_resume_uses_checkpoint_and_does_not_repeat_network_requests(tmp_path: Path) -> None:

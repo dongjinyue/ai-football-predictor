@@ -101,7 +101,11 @@ def test_sporttery_facts_are_visible_in_history_browser_without_fake_exact_time(
     repository.import_match_page(_parsed("sporttery_match_page.json"), _stored("page-1"))
     repository.import_fixed_bonus(_parsed("sporttery_fixed_bonus.json"), _stored("62373"))
 
-    page = ImportRepository(database).list_matches(MatchQuery(season="2015", page_size=10))
+    page = ImportRepository(database).list_matches(MatchQuery(season="2015", page_size=10, source="sporttery"))
+    summary = ImportRepository(database).data_summary(source="sporttery")
+    assert summary["matches"] == 2
+    assert summary["market_snapshots"] == 5
+    assert summary["market_outcomes"] == 54
 
     assert page.total_items == 2
     visible = next(item for item in page.items if "主队甲" in item.home_team)
