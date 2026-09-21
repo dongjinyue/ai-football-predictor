@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from copy import deepcopy
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -10,8 +12,13 @@ from pathlib import Path
 from app.sporttery.cli import parse_args
 from app.sporttery.client import BlockedBySourceError, SourceBusinessError
 from app.sporttery.models import HttpPayload
-from app.sporttery.repository import SportteryRepository
-from app.sporttery.service import SportteryCollectionService
+from app.sporttery.repository import SportteryRepository, SynchronizedSportteryRepository
+from app.sporttery.service import (
+    CollectionReport,
+    SportteryCollectionService,
+    collect_with_blocked_retries,
+    collect_years,
+)
 from app.sporttery.storage import CheckpointStore, RawResponseStore
 
 
@@ -233,3 +240,95 @@ def test_cli_parses_collection_controls_and_dry_run() -> None:
     assert (args.delay_min, args.delay_max) == (3.0, 5.0)
     assert args.resume is True
     assert args.dry_run is True
+
+
+def test_cli_parses_parallel_year_collection_controls() -> None:
+    args = parse_args([
+        "collect-years", "--start-year", "2016", "--end-year", "2026",
+        "--workers", "3", "--delay-min", "3", "--delay-max", "5", "--resume",
+    ])
+
+    assert args.command == "collect-years"
+    assert (args.start_year, args.end_year) == (2016, 2026)
+    assert args.workers == 3
+    assert args.resume is True
+
+
+def test_collect_years_runs_years_in_parallel_and_keeps_result_order() -> None:
+    active = 0
+    maximum_active = 0
+    guard = threading.Lock()
+
+    def collect(year: int):
+        nonlocal active, maximum_active
+        with guard:
+            active += 1
+            maximum_active = max(maximum_active, active)
+        time.sleep(0.02)
+        with guard:
+            active -= 1
+        return year
+
+    results = collect_years(range(2016, 2019), workers=3, collect=collect)
+
+    assert results == [2016, 2017, 2018]
+    assert maximum_active == 3
+
+
+def test_synchronized_repository_serializes_database_writes() -> None:
+    active = 0
+    maximum_active = 0
+    guard = threading.Lock()
+
+    class RecordingRepository:
+        def import_match_page(self, page, raw) -> None:
+            nonlocal active, maximum_active
+            with guard:
+                active += 1
+                maximum_active = max(maximum_active, active)
+            time.sleep(0.02)
+            with guard:
+                active -= 1
+
+    repository = SynchronizedSportteryRepository(RecordingRepository())
+    threads = [
+        threading.Thread(target=repository.import_match_page, args=(None, None))
+        for _ in range(3)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert maximum_active == 1
+
+
+def test_blocked_year_waits_and_resumes_from_checkpoint() -> None:
+    resume_values: list[bool] = []
+    waits: list[float] = []
+
+    def collect(resume: bool) -> CollectionReport:
+        resume_values.append(resume)
+        return CollectionReport(
+            status="blocked" if len(resume_values) == 1 else "completed",
+            start_date=date(2016, 1, 1),
+            end_date=date(2016, 12, 31),
+            completed_pages=1,
+            discovered_matches=2,
+            duplicate_match_rows=0,
+            completed_bonus=1,
+            failed_bonus=0,
+            stopped_reason="http_567" if len(resume_values) == 1 else None,
+        )
+
+    result = collect_with_blocked_retries(
+        collect,
+        initial_resume=False,
+        retries=2,
+        base_wait=60,
+        sleep=waits.append,
+    )
+
+    assert result.status == "completed"
+    assert resume_values == [False, True]
+    assert waits == [60]

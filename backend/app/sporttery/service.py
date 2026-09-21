@@ -5,6 +5,7 @@ from __future__ import annotations
 import random
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import date, timedelta
 
@@ -37,6 +38,41 @@ class CollectionReport:
     completed_bonus: int
     failed_bonus: int
     stopped_reason: str | None
+
+
+def collect_years(
+    years,
+    *,
+    workers: int,
+    collect: Callable[[int], object],
+) -> list[object]:
+    """并行执行互不重叠的年份任务，并按年份顺序返回结果。"""
+    year_list = list(years)
+    if workers < 1:
+        raise ValueError("workers_must_be_positive")
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        return list(executor.map(collect, year_list))
+
+
+def collect_with_blocked_retries(
+    collect: Callable[[bool], CollectionReport],
+    *,
+    initial_resume: bool,
+    retries: int,
+    base_wait: float,
+    sleep: Callable[[float], None] = time.sleep,
+) -> CollectionReport:
+    """来源返回 567 时指数等待，并从该年份检查点继续。"""
+    if retries < 0 or base_wait < 0:
+        raise ValueError("invalid_blocked_retry_policy")
+    result = collect(initial_resume)
+    for attempt in range(retries):
+        if result.status != "blocked" or result.stopped_reason != "http_567":
+            return result
+        wait_seconds = min(base_wait * (2 ** attempt), 900.0)
+        sleep(wait_seconds)
+        result = collect(True)
+    return result
 
 
 class SportteryCollectionService:

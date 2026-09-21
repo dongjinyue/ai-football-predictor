@@ -6,6 +6,8 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, time
 from pathlib import Path
+from threading import RLock
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import duckdb
@@ -34,6 +36,26 @@ class CoverageReport:
     outcomes: int
     request_records: int
     snapshots_by_market: tuple[tuple[str, int], ...]
+
+
+class SynchronizedSportteryRepository:
+    """为并行下载任务串行化数据库访问，避免多个线程同时写 DuckDB。"""
+
+    def __init__(self, repository: Any) -> None:
+        self._repository = repository
+        self._lock = RLock()
+
+    def import_match_page(self, page: MatchPageRecord, raw: StoredResponse) -> None:
+        with self._lock:
+            self._repository.import_match_page(page, raw)
+
+    def import_fixed_bonus(self, record: FixedBonusRecord, raw: StoredResponse) -> None:
+        with self._lock:
+            self._repository.import_fixed_bonus(record, raw)
+
+    def coverage_report(self, year: int) -> CoverageReport:
+        with self._lock:
+            return self._repository.coverage_report(year)
 
 
 class SportteryRepository:
