@@ -8,8 +8,9 @@ import {
   ShieldCheck,
 } from 'lucide-react'
 import HistoryPage from './features/history/HistoryPage'
+import MatchMarketHistoryPage from './features/history/MatchMarketHistoryPage'
 import DataQualityPage from './features/quality/DataQualityPage'
-import { hashRoute, normalizeLocation } from './routing'
+import { hashRoute, matchDetailRoute, normalizeLocation } from './routing'
 
 const navigation = [
   { label: '今日赛事', route: 'today', icon: CalendarDays, ready: true },
@@ -28,7 +29,8 @@ const foundationItems = [
 function App() {
   const [hash, setHash] = useState(() => normalizeLocation(new URL(window.location.href)).hash)
   const activeRoute = hashRoute(hash) || 'today'
-  const isHistory = activeRoute === 'history'
+  const detailRoute = matchDetailRoute(hash)
+  const isHistory = activeRoute === 'history' || detailRoute !== null
   const isQuality = activeRoute === 'quality'
 
   useEffect(() => {
@@ -77,7 +79,7 @@ function App() {
         <nav aria-label="主要导航" className="primary-nav">
           {navigation.map(({ label, route, icon: Icon, ready }) => (
             <a
-              aria-current={route === activeRoute ? 'page' : undefined}
+              aria-current={(route === activeRoute || route === 'history' && isHistory) ? 'page' : undefined}
               className="nav-link"
               href={`#${route}`}
               key={label}
@@ -96,7 +98,10 @@ function App() {
       </aside>
 
       <main className="main-content">
-        {isHistory ? <HistoryPage /> : isQuality ? <DataQualityPage /> : <>
+        {detailRoute ? <MatchMarketHistoryPage
+          matchId={detailRoute.matchId}
+          returnHash={detailRoute.returnHash}
+        /> : isHistory ? <HistoryPage /> : isQuality ? <DataQualityPage /> : <>
         <header className="page-header">
           <div>
             <p className="eyebrow page-index">工作台 / 基础骨架</p>

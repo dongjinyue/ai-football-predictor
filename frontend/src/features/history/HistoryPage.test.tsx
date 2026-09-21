@@ -69,6 +69,17 @@ beforeEach(() => {
 })
 afterEach(() => { cleanup(); vi.useRealTimers() })
 
+it('从列表进入详情时保留筛选和分页', async () => {
+  window.history.replaceState(null, '', '/#history?season=2324&page=12&pageSize=20')
+  render(<HistoryPage />)
+
+  const link = (await screen.findAllByRole('link', { name: /市场详情/ }))[0]
+  expect(link).toHaveAttribute(
+    'href',
+    expect.stringContaining('return=%23history%3Fseason%3D2324%26page%3D12%26pageSize%3D20'),
+  )
+})
+
 describe('历史比赛页面', () => {
   it('体彩比赛只有日期时明确显示时间未知', async () => {
     vi.mocked(fetchMatchPage).mockResolvedValue({
@@ -213,31 +224,12 @@ describe('历史比赛页面', () => {
     expect(latestSignal.aborted).toBe(true)
   })
 
-  it('opens only one match and includes provenance and kickoff-bound warnings', async () => {
+  it('uses an independent market detail link instead of expanding dense odds inline', async () => {
     render(<HistoryPage />)
     await screen.findByText('阿森纳 2–1 埃弗顿')
-    const buttons = screen.getAllByRole('button', { name: /展开市场/ })
-    fireEvent.click(buttons[0])
-    expect(buttons[0]).toHaveAttribute('aria-expanded', 'true')
-    const details = screen.getByRole('region', { name: '阿森纳 对 埃弗顿 的市场详情' })
-    expect(within(details).getByText('亚洲让球')).toBeInTheDocument()
-    expect(within(details).getByText('1.50')).toBeInTheDocument()
-    expect(within(details).getByText('大小球（2.5）')).toBeInTheDocument()
-    for (const text of ['来源', '提供方', '阶段', '采集时间（记录值）', '可用时间', '时间精度']) {
-      expect(within(details).getAllByText(text).length).toBeGreaterThan(0)
-    }
-    expect(within(details).getAllByText(/仅能确认开球时可用，不能用于开球前回测/).length).toBeGreaterThan(0)
-    expect(within(details).getAllByText('公开足球数据').length).toBeGreaterThan(0)
-    expect(within(details).getAllByText('收盘').length).toBeGreaterThan(0)
-    expect(within(details).getAllByText('开球时间边界').length).toBeGreaterThan(0)
-    expect(within(details).queryByText('football_data')).not.toBeInTheDocument()
-    expect(within(details).queryByText('closing')).not.toBeInTheDocument()
-    expect(within(details).queryByText('kickoff_bound')).not.toBeInTheDocument()
-    fireEvent.click(buttons[1])
-    expect(buttons[0]).toHaveAttribute('aria-expanded', 'false')
-    expect(screen.queryByRole('region', { name: '阿森纳 对 埃弗顿 的市场详情' })).not.toBeInTheDocument()
-    fireEvent.click(buttons[1])
-    expect(buttons[1]).toHaveAttribute('aria-expanded', 'false')
+    const links = screen.getAllByRole('link', { name: /市场详情/ })
+    expect(links[0]).toHaveAttribute('href', expect.stringContaining('#history/match/arsenal-everton'))
+    expect(screen.queryByRole('region', { name: /市场详情/ })).not.toBeInTheDocument()
   })
 
   it('shows pending state without invented scores', () => {
@@ -310,19 +302,51 @@ describe('历史比赛页面', () => {
     expect(screen.getByText('共 380 条')).toBeInTheDocument()
   })
 
-  it('opens the in-page import controls and starts a background job', async () => {
+  it('uses handicap result odds as the row fallback without expanding dense outcomes inline', async () => {
+    vi.mocked(fetchMatchPage).mockResolvedValue({
+      ...page,
+      totalItems: 1,
+      totalPages: 1,
+      items: [{
+        ...match,
+        id: 'handicap-only',
+        markets: [
+          { marketType: 'handicap_result', stage: 'closing', timePrecision: 'exact',
+            source: 'sporttery', provider: 'china_sports_lottery', capturedAt: '2015-12-30T12:00:00Z',
+            availableAt: '2015-12-30T12:00:00Z', line: -3,
+            outcomes: [{ outcomeCode: 'home', odds: 2.62 }, { outcomeCode: 'draw', odds: 4.45 }, { outcomeCode: 'away', odds: 1.92 }] },
+          { marketType: 'correct_score', stage: 'closing', timePrecision: 'exact',
+            source: 'sporttery', provider: 'china_sports_lottery', capturedAt: '2015-12-28T12:00:00Z',
+            availableAt: '2015-12-28T12:00:00Z', line: null,
+            outcomes: [{ outcomeCode: '0_0', odds: 50 }, { outcomeCode: '0_1', odds: 80 }, { outcomeCode: 'other_home', odds: 120 }] },
+          { marketType: 'half_full', stage: 'closing', timePrecision: 'exact',
+            source: 'sporttery', provider: 'china_sports_lottery', capturedAt: '2015-12-28T12:00:00Z',
+            availableAt: '2015-12-28T12:00:00Z', line: null,
+            outcomes: [{ outcomeCode: 'away_away', odds: 14 }, { outcomeCode: 'draw_home', odds: 8 }] },
+        ],
+      }],
+    })
+
+    render(<HistoryPage />)
+    const table = await screen.findByRole('table', { name: '历史比赛列表' })
+    expect(within(table).getByText('让球 -3')).toBeInTheDocument()
+    for (const odds of ['2.62', '4.45', '1.92']) expect(within(table).getByText(odds)).toBeInTheDocument()
+
+    expect(screen.getByRole('link', { name: /市场详情/ })).toHaveAttribute(
+      'href',
+      expect.stringContaining('#history/match/handicap-only'),
+    )
+    expect(screen.queryByText('away_away')).not.toBeInTheDocument()
+  })
+
+  it('refreshes Sporttery data without offering the old source import', async () => {
     render(<HistoryPage />)
     await screen.findByText('阿森纳 2–1 埃弗顿')
-    fireEvent.click(screen.getByRole('button', { name: '导入历史数据' }))
-    expect(await screen.findByRole('region', { name: '导入历史数据' })).toBeInTheDocument()
-    expect(screen.getByLabelText('开始年份')).toHaveValue('2000')
-    expect(screen.getByLabelText('结束年份')).toHaveValue('2020')
-    fireEvent.click(screen.getByRole('button', { name: '开始导入' }))
-    await waitFor(() => expect(submitImportJob).toHaveBeenCalledWith(
-      { competitionCodes: [], startYear: 2000, endYear: 2020 },
-      expect.any(AbortSignal),
-    ))
-    expect(await screen.findByText('导入已完成')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '导入历史数据' })).not.toBeInTheDocument()
+    expect(screen.getByText('中国竞彩 · Sporttery')).toBeInTheDocument()
+    const before = vi.mocked(fetchMatchPage).mock.calls.length
+    fireEvent.click(screen.getByRole('button', { name: '刷新竞彩数据' }))
+    await waitFor(() => expect(fetchMatchPage).toHaveBeenCalledTimes(before + 1))
   })
 
 })

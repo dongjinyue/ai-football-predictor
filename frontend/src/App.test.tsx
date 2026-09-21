@@ -4,11 +4,13 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import App from './App'
+import { fetchMatchMarketHistory } from './features/history/api'
 
 vi.mock('./features/history/api', () => ({
   fetchDataSummary: vi.fn(() => new Promise(() => {})),
   fetchMatchPage: vi.fn(() => new Promise(() => {})),
   fetchDataAudit: vi.fn(() => new Promise(() => {})),
+  fetchMatchMarketHistory: vi.fn(() => new Promise(() => {})),
 }))
 
 afterEach(() => {
@@ -17,6 +19,21 @@ afterEach(() => {
 })
 
 describe('Dashboard shell', () => {
+  it('renders the standalone match detail route and keeps history navigation active', async () => {
+    vi.mocked(fetchMatchMarketHistory).mockResolvedValue({
+      id: 'sporttery:70001', competitionCode: 'JC25', competitionName: '英超', season: '2015',
+      kickoffAt: '2015-01-02T12:00:00Z', kickoffTimePrecision: 'date_only',
+      homeTeam: '主队', awayTeam: '客队', halfTimeHomeScore: 0, halfTimeAwayScore: 0,
+      homeScore: 1, awayScore: 0, markets: [],
+    })
+    window.history.replaceState(null, '', '/#history/match/sporttery%3A70001?return=%23history%3Fseason%3D2015')
+
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: '主队 1–0 客队' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: '历史比赛' })).toHaveAttribute('aria-current', 'page')
+    expect(screen.getByRole('link', { name: '返回历史比赛' })).toHaveAttribute('href', '#history?season=2015')
+  })
   it('opens the historical match route and returns to today', async () => {
     render(<App />)
     const historyLink = screen.getByRole('link', { name: '历史比赛' })
