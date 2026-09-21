@@ -6,6 +6,7 @@ import {
   fetchDataSummary,
   fetchImportCatalog,
   fetchImportJob,
+  fetchMatchMarketHistory,
   fetchMatchPage,
   submitImportJob,
 } from './api'
@@ -93,7 +94,7 @@ describe('历史数据 API 客户端', () => {
     )
 
     expect(fetchMock.mock.calls[0][0]).toBe(
-      'http://127.0.0.1:8000/api/data/matches?page=1&page_size=20',
+      'http://127.0.0.1:8000/api/data/matches?source=sporttery&page=1&page_size=20',
     )
     expect(page.items[0]).toMatchObject({
       competitionCode: 'E0',
@@ -153,6 +154,10 @@ describe('历史数据 API 客户端', () => {
       latestKickoffAt: '2024-05-19T15:00:00Z',
       latestSuccessfulImportAt: null,
     })
+    expect(fetch).toHaveBeenCalledWith(
+      'http://127.0.0.1:8000/api/data/summary?source=sporttery',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    )
   })
 
   it('读取训练前数据审计并保留联赛赛季与盘口时间统计', async () => {
@@ -266,6 +271,76 @@ describe('历史数据 API 客户端', () => {
     expect(fetchMock.mock.calls[1][1]).toMatchObject({
       method: 'POST',
       body: JSON.stringify({ start_year: 2000, end_year: 2020, competition_codes: [] }),
+    })
+  })
+})
+
+describe('单场市场历史 API 客户端', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('编码比赛 ID 并把完整时间线映射为前端字段', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: vi.fn().mockResolvedValue({
+        id: 'sporttery:70001',
+        competition_code: 'JC25',
+        competition_name: '英超',
+        season: '2015',
+        kickoff_at: '2015-01-02T12:00:00Z',
+        kickoff_time_precision: 'date_only',
+        home_team: '主队',
+        away_team: '客队',
+        half_time_home_score: 0,
+        half_time_away_score: 0,
+        home_score: 1,
+        away_score: 0,
+        markets: [{
+          market_type: 'match_result',
+          line: null,
+          source: 'sporttery',
+          provider: 'china_sports_lottery',
+          stage: 'closing',
+          time_precision: 'exact',
+          outcome_codes: ['home', 'draw', 'away'],
+          snapshots: [{
+            captured_at: '2015-01-01T00:00:00Z',
+            available_at: '2015-01-01T00:00:00Z',
+            outcomes: [{ outcome_code: 'home', odds: 2.1 }],
+          }],
+        }],
+      }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await fetchMatchMarketHistory('sporttery:70001')
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://127.0.0.1:8000/api/data/matches/sporttery%3A70001/market-history',
+      { signal: undefined },
+    )
+    expect(result).toMatchObject({
+      id: 'sporttery:70001',
+      competitionCode: 'JC25',
+      homeTeam: '主队',
+      markets: [{
+        marketType: 'match_result',
+        outcomeCodes: ['home', 'draw', 'away'],
+        snapshots: [{
+          capturedAt: '2015-01-01T00:00:00Z',
+          outcomes: [{ outcomeCode: 'home', odds: 2.1 }],
+        }],
+      }],
+    })
+  })
+
+  it('保留详情接口的 404 状态供页面区分未找到', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 404 }))
+
+    await expect(fetchMatchMarketHistory('missing')).rejects.toMatchObject({
+      name: 'DataRequestError',
+      status: 404,
     })
   })
 })

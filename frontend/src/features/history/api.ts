@@ -7,6 +7,8 @@ import type {
   ImportCatalog,
   ImportJob,
   MatchFilters,
+  MatchMarketHistory,
+  MarketHistoryGroup,
   MatchMarket,
   MatchPage,
   MarketOutcome,
@@ -106,6 +108,39 @@ interface DataSummaryResponse {
   latest_successful_import_at: string | null
 }
 
+interface MarketHistorySnapshotResponse {
+  captured_at: string
+  available_at: string
+  outcomes: OutcomeResponse[]
+}
+
+interface MarketHistoryGroupResponse {
+  market_type: string
+  line: number | null
+  source: string
+  provider: string
+  stage: string
+  time_precision: string
+  outcome_codes: string[]
+  snapshots: MarketHistorySnapshotResponse[]
+}
+
+interface MatchMarketHistoryResponse {
+  id: string
+  competition_code: string
+  competition_name: string
+  season: string
+  kickoff_at: string
+  kickoff_time_precision: 'exact' | 'date_only'
+  home_team: string
+  away_team: string
+  half_time_home_score: number | null
+  half_time_away_score: number | null
+  home_score: number | null
+  away_score: number | null
+  markets: MarketHistoryGroupResponse[]
+}
+
 interface DataAuditResponse {
   start_year: number
   end_year: number
@@ -169,6 +204,7 @@ function appendTextFilter(
 function buildMatchUrl(filters: MatchFilters): string {
   const url = new URL('/api/data/matches', API_BASE_URL)
   const params = url.searchParams
+  params.set('source', 'sporttery')
 
   if (filters.page !== undefined) {
     params.set('page', String(filters.page))
@@ -183,7 +219,7 @@ function buildMatchUrl(filters: MatchFilters): string {
   return url.toString()
 }
 
-async function requestJson<T>(url: string, signal: AbortSignal, init: RequestInit = {}): Promise<T> {
+async function requestJson<T>(url: string, signal?: AbortSignal, init: RequestInit = {}): Promise<T> {
   const response = await fetch(url, { ...init, signal })
 
   if (!response.ok) {
@@ -211,6 +247,41 @@ function formatMarket(market: MarketResponse): MatchMarket {
     availableAt: market.available_at,
     line: market.line,
     outcomes: market.outcomes.map(formatOutcome),
+  }
+}
+
+function formatMarketHistoryGroup(market: MarketHistoryGroupResponse): MarketHistoryGroup {
+  return {
+    marketType: market.market_type,
+    line: market.line,
+    source: market.source,
+    provider: market.provider,
+    stage: market.stage,
+    timePrecision: market.time_precision,
+    outcomeCodes: market.outcome_codes,
+    snapshots: market.snapshots.map((snapshot) => ({
+      capturedAt: snapshot.captured_at,
+      availableAt: snapshot.available_at,
+      outcomes: snapshot.outcomes.map(formatOutcome),
+    })),
+  }
+}
+
+function formatMatchMarketHistory(match: MatchMarketHistoryResponse): MatchMarketHistory {
+  return {
+    id: match.id,
+    competitionCode: match.competition_code,
+    competitionName: match.competition_name,
+    season: match.season,
+    kickoffAt: match.kickoff_at,
+    kickoffTimePrecision: match.kickoff_time_precision,
+    homeTeam: match.home_team,
+    awayTeam: match.away_team,
+    halfTimeHomeScore: match.half_time_home_score,
+    halfTimeAwayScore: match.half_time_away_score,
+    homeScore: match.home_score,
+    awayScore: match.away_score,
+    markets: match.markets.map(formatMarketHistoryGroup),
   }
 }
 
@@ -363,9 +434,22 @@ export async function fetchMatchPage(
 
 /** 请求当前数据库摘要，并将后端响应格式化为前端命名。 */
 export async function fetchDataSummary(signal: AbortSignal): Promise<DataSummary> {
-  const url = new URL('/api/data/summary', API_BASE_URL).toString()
+  const url = new URL('/api/data/summary?source=sporttery', API_BASE_URL).toString()
   const response = await requestJson<DataSummaryResponse>(url, signal)
   return formatDataSummary(response)
+}
+
+/** 按需读取一场竞彩彩票比赛的全部官方赔率快照。 */
+export async function fetchMatchMarketHistory(
+  matchId: string,
+  signal?: AbortSignal,
+): Promise<MatchMarketHistory> {
+  const url = new URL(
+    `/api/data/matches/${encodeURIComponent(matchId)}/market-history`,
+    API_BASE_URL,
+  ).toString()
+  const response = await requestJson<MatchMarketHistoryResponse>(url, signal)
+  return formatMatchMarketHistory(response)
 }
 
 /** 请求训练前数据审计；默认范围覆盖项目约定的 2000–2020 历史数据。 */

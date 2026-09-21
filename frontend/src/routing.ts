@@ -37,6 +37,28 @@ export function buildHash(route: string, params: URLSearchParams = new URLSearch
   return `#${route}${query ? `?${query}` : ''}`
 }
 
+/** 创建详情地址，并把当前列表哈希作为返回目标保存。 */
+export function buildMatchDetailHash(matchId: string, returnHash: string): string {
+  const params = new URLSearchParams({ return: returnHash || '#history' })
+  return buildHash(`history/match/${encodeURIComponent(matchId)}`, params)
+}
+
+/** 解析历史比赛详情子路由；非法百分号编码视为无效路由。 */
+export function matchDetailRoute(
+  value: string,
+): { matchId: string; returnHash: string } | null {
+  const match = hashRoute(value).match(/^history\/match\/([^/]+)$/)
+  if (!match) return null
+  try {
+    return {
+      matchId: decodeURIComponent(match[1]),
+      returnHash: hashParams(value).get('return') || '#history',
+    }
+  } catch {
+    return null
+  }
+}
+
 /** 规范化哈希本身，但不移动哈希前面的旧查询参数。 */
 export function normalizeHash(value: string): string {
   if (!value || value === '#') return value

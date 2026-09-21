@@ -49,6 +49,39 @@ export interface HistoricalMatch {
   markets: MatchMarket[]
 }
 
+export interface MarketHistorySnapshot {
+  capturedAt: string
+  availableAt: string
+  outcomes: MarketOutcome[]
+}
+
+export interface MarketHistoryGroup {
+  marketType: string
+  line: number | null
+  source: string
+  provider: string
+  stage: string
+  timePrecision: string
+  outcomeCodes: string[]
+  snapshots: MarketHistorySnapshot[]
+}
+
+export interface MatchMarketHistory {
+  id: string
+  competitionCode: string
+  competitionName: string
+  season: string
+  kickoffAt: string
+  kickoffTimePrecision: 'exact' | 'date_only'
+  homeTeam: string
+  awayTeam: string
+  halfTimeHomeScore: number | null
+  halfTimeAwayScore: number | null
+  homeScore: number | null
+  awayScore: number | null
+  markets: MarketHistoryGroup[]
+}
+
 export interface ImportCompetition {
   code: string
   name: string
