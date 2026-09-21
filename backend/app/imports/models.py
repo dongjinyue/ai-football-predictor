@@ -192,6 +192,7 @@ class MatchQuery:
 
     page: int = 1
     page_size: int = 20
+    source: str | None = None
     competition: str | None = None
     season: str | None = None
     team: str | None = None
@@ -233,6 +234,48 @@ class HistoricalMatchView:
     markets: tuple[MatchMarketView, ...]
     # date_only 的 kickoff_at 仅为排序锚点，界面不得显示其时分秒。
     kickoff_time_precision: str = "exact"
+
+
+@dataclass(frozen=True)
+class MarketHistorySnapshotView:
+    """中国竞彩彩票在一个官方发布时间发布的一组赔率。"""
+
+    captured_at: datetime
+    available_at: datetime
+    outcomes: tuple[tuple[str, float], ...]
+
+
+@dataclass(frozen=True)
+class MarketHistoryGroupView:
+    """同一玩法和盘口的完整赔率时间线。"""
+
+    market_type: str
+    line: float | None
+    source: str
+    provider: str
+    stage: str
+    time_precision: str
+    outcome_codes: tuple[str, ...]
+    snapshots: tuple[MarketHistorySnapshotView, ...]
+
+
+@dataclass(frozen=True)
+class MatchMarketHistoryView:
+    """单场比赛及其所有已采集的中国竞彩彩票赔率记录。"""
+
+    id: str
+    competition_code: str
+    competition_name: str
+    season: str
+    kickoff_at: datetime
+    kickoff_time_precision: str
+    home_team: str
+    away_team: str
+    half_time_home_score: int | None
+    half_time_away_score: int | None
+    home_score: int | None
+    away_score: int | None
+    markets: tuple[MarketHistoryGroupView, ...]
 
 
 @dataclass(frozen=True)

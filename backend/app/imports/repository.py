@@ -24,6 +24,9 @@ from app.imports.models import (
     ImportRunAudit,
     ImportRunResult,
     MatchFilterOptions,
+    MatchMarketHistoryView,
+    MarketHistoryGroupView,
+    MarketHistorySnapshotView,
     MatchMarketView,
     MatchPage,
     MatchQuery,
@@ -36,6 +39,32 @@ from app.storage import initialize_database
 # 固定命名空间让同一来源自然键在不同进程、不同机器上得到完全相同的身份。
 APPLICATION_NAMESPACE = uuid.UUID("baf3f034-97ca-5c75-8c35-6e3c678d9b3a")
 _WHITESPACE = re.compile(r"\s+")
+
+_MARKET_ORDER = {
+    "match_result": 0,
+    "handicap_result": 1,
+    "correct_score": 2,
+    "total_goals": 3,
+    "half_full": 4,
+}
+_OUTCOME_ORDER = {
+    "match_result": ("home", "draw", "away"),
+    "handicap_result": ("home", "draw", "away"),
+    "correct_score": (
+        "1_0", "2_0", "2_1", "3_0", "3_1", "3_2",
+        "4_0", "4_1", "4_2", "5_0", "5_1", "5_2",
+        "0_0", "1_1", "2_2", "3_3",
+        "0_1", "0_2", "1_2", "0_3", "1_3", "2_3",
+        "0_4", "1_4", "2_4", "0_5", "1_5", "2_5",
+        "other_home", "other_draw", "other_away",
+    ),
+    "total_goals": ("0", "1", "2", "3", "4", "5", "6", "7_plus"),
+    "half_full": (
+        "home_home", "home_draw", "home_away",
+        "draw_home", "draw_draw", "draw_away",
+        "away_home", "away_draw", "away_away",
+    ),
+}
 
 
 class RepositoryError(RuntimeError):
@@ -356,7 +385,9 @@ class ImportRepository:
             requested_scope=tuple(ImportRequestScope(*scope_row) for scope_row in scope_rows),
         )
 
-    def data_summary(self) -> dict[str, object]:
+    def data_summary(self, source: str | None = None) -> dict[str, object]:
+        if source is not None:
+            return self._source_summary(source)
         """返回 API 可直接消费的数据规模与最新安全时间点。"""
         with self._connect() as connection:
             counts = {
@@ -370,6 +401,40 @@ class ImportRepository:
                 "SELECT CAST(MAX(finished_at) AS VARCHAR) FROM import_runs WHERE status IN ('completed', 'completed_with_errors')"
             ).fetchone()[0]
         return {**counts, "latest_kickoff_at": latest_kickoff, "latest_successful_import_at": latest_success}
+
+    def _source_summary(self, source: str) -> dict[str, object]:
+        """统计仅关联当前来源的比赛和赔率，避免旧来源混入页面。"""
+        with self._connect() as connection:
+            row = connection.execute("""
+                SELECT COUNT(*), COUNT(DISTINCT competition_id),
+                       CAST(MAX(kickoff_at) AS VARCHAR)
+                FROM matches WHERE source = ?
+            """, [source]).fetchone()
+            teams = connection.execute("""
+                SELECT COUNT(*) FROM (
+                    SELECT home_team_id FROM matches WHERE source = ?
+                    UNION SELECT away_team_id FROM matches WHERE source = ?
+                )
+            """, [source, source]).fetchone()[0]
+            markets = connection.execute("""
+                SELECT COUNT(DISTINCT s.id), COUNT(o.id)
+                FROM market_snapshots s
+                JOIN matches m ON m.id = s.match_id
+                LEFT JOIN market_outcomes o ON o.snapshot_id = s.id
+                WHERE m.source = ? AND s.source = ?
+            """, [source, source]).fetchone()
+            if source == "sporttery":
+                latest = connection.execute(
+                    "SELECT CAST(MAX(imported_at) AS VARCHAR) FROM sporttery_matches"
+                ).fetchone()[0]
+            else:
+                latest = connection.execute("""
+                    SELECT CAST(MAX(finished_at) AS VARCHAR) FROM import_runs
+                    WHERE source = ? AND status IN ('completed', 'completed_with_errors')
+                """, [source]).fetchone()[0]
+        return dict(matches=row[0], competitions=row[1], teams=teams,
+                    market_snapshots=markets[0], market_outcomes=markets[1],
+                    latest_kickoff_at=row[2], latest_successful_import_at=latest)
 
     def data_audit(
         self,
@@ -608,14 +673,16 @@ class ImportRepository:
                         """
                         SELECT DISTINCT source_competition_id
                         FROM competitions
+                        WHERE (? IS NULL OR source = ?)
                         ORDER BY source_competition_id
-                        """
+                        """, [query.source, query.source]
                     ).fetchall()
                 ),
                 seasons=tuple(
                     row[0]
                     for row in connection.execute(
-                        "SELECT DISTINCT season FROM matches ORDER BY season"
+                        "SELECT DISTINCT season FROM matches WHERE (? IS NULL OR source = ?) ORDER BY season",
+                        [query.source, query.source],
                     ).fetchall()
                 ),
             )
@@ -650,6 +717,45 @@ class ImportRepository:
             filters=filters,
             items=items,
         )
+
+    def get_match_market_history(self, match_id: str) -> MatchMarketHistoryView | None:
+        """按核心比赛 ID 读取完整体彩赔率时间线，不复用列表页的最新快照。"""
+        with self._connect() as connection:
+            match_row = connection.execute(
+                """
+                SELECT match.id, competition.source_competition_id, competition.name_zh,
+                       match.season, CAST(match.kickoff_at AS VARCHAR),
+                       match.kickoff_time_precision, home.name_zh, away.name_zh,
+                       match.half_time_home_score, match.half_time_away_score,
+                       match.home_score, match.away_score, sporttery.match_id
+                FROM matches AS match
+                JOIN competitions AS competition ON competition.id = match.competition_id
+                JOIN teams AS home ON home.id = match.home_team_id
+                JOIN teams AS away ON away.id = match.away_team_id
+                JOIN sporttery_matches AS sporttery
+                  ON CAST(sporttery.match_id AS VARCHAR) = match.source_match_id
+                WHERE match.id = ? AND match.source = 'sporttery'
+                """,
+                [match_id],
+            ).fetchone()
+            if match_row is None:
+                return None
+
+            rows = connection.execute(
+                """
+                SELECT snapshot.id, snapshot.market_type, CAST(snapshot.handicap AS DOUBLE),
+                       snapshot.handicap_key, CAST(snapshot.captured_at AS VARCHAR),
+                       outcome.outcome_code, outcome.odds_value
+                FROM sporttery_bonus_snapshots AS snapshot
+                LEFT JOIN sporttery_bonus_outcomes AS outcome
+                  ON outcome.snapshot_id = snapshot.id
+                WHERE snapshot.match_id = ?
+                ORDER BY snapshot.captured_at, snapshot.id, outcome.outcome_code
+                """,
+                [match_row[12]],
+            ).fetchall()
+
+        return _build_match_market_history(match_row, rows)
 
     def _connect(self) -> duckdb.DuckDBPyConnection:
         return duckdb.connect(str(self.database_path))
@@ -1539,6 +1645,9 @@ def _match_filter_sql(query: MatchQuery) -> tuple[list[str], list[str]]:
     """构造参数化筛选片段；球队关键词中的 LIKE 元字符按普通文本处理。"""
     conditions: list[str] = []
     parameters: list[str] = []
+    if query.source:
+        conditions.append("match.source = ?")
+        parameters.append(query.source)
     if query.competition:
         conditions.append("competition.source_competition_id = ?")
         parameters.append(query.competition)
@@ -1557,6 +1666,102 @@ def _match_filter_sql(query: MatchQuery) -> tuple[list[str], list[str]]:
 def _escape_like(value: str) -> str:
     """转义 LIKE 的反斜杠、百分号和下划线，避免用户输入扩展匹配范围。"""
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _build_match_market_history(
+    match_row: tuple[object, ...],
+    rows: list[tuple[object, ...]],
+) -> MatchMarketHistoryView:
+    """把联表结果按玩法、盘口和快照分层，防止同一发布时间的数据互相覆盖。"""
+    grouped: dict[
+        tuple[str, str],
+        dict[str, object],
+    ] = {}
+    for snapshot_id, market_type, line, line_key, captured_at, outcome_code, odds_value in rows:
+        group_key = (str(market_type), str(line_key))
+        group = grouped.setdefault(
+            group_key,
+            {
+                "market_type": str(market_type),
+                "line": float(line) if line is not None else None,
+                "snapshots": {},
+            },
+        )
+        snapshots = group["snapshots"]
+        assert isinstance(snapshots, dict)
+        snapshot = snapshots.setdefault(
+            str(snapshot_id),
+            {
+                "captured_at": _parse_database_timestamp(str(captured_at)),
+                "outcomes": {},
+            },
+        )
+        outcomes = snapshot["outcomes"]
+        assert isinstance(outcomes, dict)
+        if outcome_code is not None:
+            outcomes[str(outcome_code)] = float(odds_value)
+
+    market_groups: list[MarketHistoryGroupView] = []
+    for group in grouped.values():
+        market_type = str(group["market_type"])
+        snapshots_by_id = group["snapshots"]
+        assert isinstance(snapshots_by_id, dict)
+        outcome_codes = _OUTCOME_ORDER.get(market_type)
+        if outcome_codes is None:
+            outcome_codes = tuple(sorted({
+                code
+                for snapshot in snapshots_by_id.values()
+                for code in snapshot["outcomes"]
+            }))
+        snapshots = tuple(
+            MarketHistorySnapshotView(
+                captured_at=snapshot["captured_at"],
+                available_at=snapshot["captured_at"],
+                outcomes=tuple(
+                    (code, snapshot["outcomes"][code])
+                    for code in outcome_codes
+                    if code in snapshot["outcomes"]
+                ),
+            )
+            for snapshot in sorted(
+                snapshots_by_id.values(), key=lambda item: item["captured_at"]
+            )
+        )
+        market_groups.append(
+            MarketHistoryGroupView(
+                market_type=market_type,
+                line=group["line"],
+                source="sporttery",
+                provider="china_sports_lottery",
+                stage="closing",
+                time_precision="exact",
+                outcome_codes=outcome_codes,
+                snapshots=snapshots,
+            )
+        )
+
+    market_groups.sort(
+        key=lambda group: (
+            _MARKET_ORDER.get(group.market_type, len(_MARKET_ORDER)),
+            group.line is None,
+            group.line if group.line is not None else 0.0,
+        )
+    )
+    return MatchMarketHistoryView(
+        id=str(match_row[0]),
+        competition_code=str(match_row[1]),
+        competition_name=str(match_row[2]),
+        season=str(match_row[3]),
+        kickoff_at=_parse_database_timestamp(str(match_row[4])),
+        kickoff_time_precision=str(match_row[5]),
+        home_team=str(match_row[6]),
+        away_team=str(match_row[7]),
+        half_time_home_score=match_row[8],
+        half_time_away_score=match_row[9],
+        home_score=match_row[10],
+        away_score=match_row[11],
+        markets=tuple(market_groups),
+    )
 
 
 def _load_closing_markets(

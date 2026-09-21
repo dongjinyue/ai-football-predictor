@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -18,9 +19,136 @@ from app.imports.models import (
 )
 from app.imports.parser import parse_football_data_csv
 from app.imports.repository import ImportRepository, RepositoryError, normalize_alias
+from app.sporttery.parser import parse_fixed_bonus, parse_match_page
+from app.sporttery.repository import SportteryRepository
+from app.sporttery.storage import StoredResponse
 
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "football_data_e0_2324.csv"
+SPORTTERY_FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def _sporttery_payload(name: str):
+    payload = json.loads((SPORTTERY_FIXTURES / name).read_text(encoding="utf-8"))
+    return parse_match_page(payload) if "match_page" in name else parse_fixed_bonus(payload)
+
+
+def _sporttery_response(key: str) -> StoredResponse:
+    return StoredResponse(
+        path=Path(f"data/raw/{key}.json"),
+        sha256=f"sha-{key}",
+        fetched_at=datetime(2026, 9, 19, tzinfo=timezone.utc),
+        request_url=f"https://example.test/{key}",
+        status_code=200,
+        data={},
+        from_cache=False,
+    )
+
+
+def _seed_sporttery_history(database_path: Path) -> str:
+    repository = SportteryRepository(database_path)
+    repository.import_match_page(
+        _sporttery_payload("sporttery_match_page.json"),
+        _sporttery_response("page-1"),
+    )
+    repository.import_fixed_bonus(
+        _sporttery_payload("sporttery_fixed_bonus.json"),
+        _sporttery_response("62373"),
+    )
+    with duckdb.connect(str(database_path), read_only=True) as connection:
+        return str(connection.execute(
+            "SELECT core_match_id FROM sporttery_matches WHERE match_id = 62373"
+        ).fetchone()[0])
+
+
+def test_get_match_market_history_returns_all_snapshots_in_business_order(tmp_path: Path) -> None:
+    database_path = tmp_path / "market-history.duckdb"
+    match_id = _seed_sporttery_history(database_path)
+    with duckdb.connect(str(database_path)) as connection:
+        connection.execute(
+            """
+            INSERT INTO sporttery_bonus_snapshots
+                (id, match_id, market_type, handicap, handicap_key, captured_at, raw_sha256)
+            VALUES
+                ('had-later', 62373, 'match_result', NULL, 'none',
+                 TIMESTAMPTZ '2015-01-02 06:00:00+00', 'later'),
+                ('handicap-plus', 62373, 'handicap_result', 1, '1',
+                 TIMESTAMPTZ '2015-01-02 03:00:00+00', 'plus')
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO sporttery_bonus_outcomes (id, snapshot_id, outcome_code, odds_value)
+            VALUES
+                ('had-later-home', 'had-later', 'home', 1.70),
+                ('had-later-draw', 'had-later', 'draw', 3.30),
+                ('had-later-away', 'had-later', 'away', 4.50),
+                ('plus-home', 'handicap-plus', 'home', 1.50),
+                ('plus-draw', 'handicap-plus', 'draw', 4.00),
+                ('plus-away', 'handicap-plus', 'away', 5.20)
+            """
+        )
+
+    result = ImportRepository(database_path).get_match_market_history(match_id)
+
+    assert result is not None
+    assert [(group.market_type, group.line) for group in result.markets] == [
+        ("match_result", None),
+        ("handicap_result", -1.0),
+        ("handicap_result", 1.0),
+        ("correct_score", None),
+        ("total_goals", None),
+        ("half_full", None),
+    ]
+    assert [snapshot.captured_at.hour for snapshot in result.markets[0].snapshots] == [1, 6]
+    assert result.markets[0].outcome_codes == ("home", "draw", "away")
+    assert dict(result.markets[0].snapshots[-1].outcomes) == {
+        "home": 1.7,
+        "draw": 3.3,
+        "away": 4.5,
+    }
+
+
+def test_get_match_market_history_handles_empty_unknown_and_business_columns(tmp_path: Path) -> None:
+    database_path = tmp_path / "market-history-empty.duckdb"
+    match_id = _seed_sporttery_history(database_path)
+    repository = ImportRepository(database_path)
+
+    result = repository.get_match_market_history(match_id)
+    assert result is not None
+    groups = {group.market_type: group for group in result.markets}
+    assert groups["total_goals"].outcome_codes == (
+        "0", "1", "2", "3", "4", "5", "6", "7_plus",
+    )
+    assert groups["half_full"].outcome_codes == (
+        "home_home", "home_draw", "home_away",
+        "draw_home", "draw_draw", "draw_away",
+        "away_home", "away_draw", "away_away",
+    )
+    assert groups["correct_score"].outcome_codes[:3] == ("1_0", "2_0", "2_1")
+    assert repository.get_match_market_history("missing") is None
+
+    with duckdb.connect(str(database_path)) as connection:
+        connection.execute("DELETE FROM sporttery_bonus_outcomes")
+        connection.execute("DELETE FROM sporttery_bonus_snapshots")
+    empty = repository.get_match_market_history(match_id)
+    assert empty is not None
+    assert empty.markets == ()
+
+
+def test_source_filter_excludes_old_data(tmp_path, source_file, parsed_file):
+    repository = ImportRepository(tmp_path / "sources.duckdb")
+    _import_once(repository, source_file, parsed_file)
+    selected = repository.list_matches(MatchQuery(source="sporttery"))
+    assert selected.total_items == 0
+    assert selected.filters.competitions == ()
+    assert selected.filters.seasons == ()
+    summary = repository.data_summary(source="sporttery")
+    for field in ("matches", "competitions", "teams", "market_snapshots", "market_outcomes"):
+        assert summary[field] == 0
+    assert summary["latest_kickoff_at"] is None
+    assert summary["latest_successful_import_at"] is None
+    assert repository.data_summary()["matches"] == 1
 
 
 @pytest.fixture
