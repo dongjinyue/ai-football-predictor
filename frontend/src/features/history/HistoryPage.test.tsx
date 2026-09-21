@@ -40,7 +40,13 @@ const match: HistoricalMatch = {
 }
 const page: MatchPage = {
   page: 1, pageSize: 20, totalItems: 380, totalPages: 19,
-  filters: { competitions: ['E0', 'D1'], seasons: ['2324', '2425'] },
+  filters: {
+    competitions: [
+      { code: 'E0', name: '英格兰超级联赛' },
+      { code: 'D1', name: '德国甲级联赛' },
+    ],
+    seasons: ['2324', '2425'],
+  },
   items: Array.from({ length: 20 }, (_, index) => index === 0 ? match : {
     ...match, id: `match-${index}`, homeTeam: `主队 ${index}`, awayTeam: `客队 ${index}`,
   }),
@@ -98,18 +104,16 @@ describe('历史比赛页面', () => {
     expect(screen.queryByText(/12:00:00/)).not.toBeInTheDocument()
   })
 
-  it('does not clear a committed query while IME composition is active', async () => {
+  it('does not clear a committed query until the draft is searched', async () => {
     window.history.replaceState(null, '', '/#history?team=Arsenal')
     render(<HistoryPage />)
     await screen.findByText('阿森纳 2–1 埃弗顿')
-    vi.useFakeTimers()
     const input = screen.getByLabelText('球队')
-    fireEvent.compositionStart(input)
     fireEvent.change(input, { target: { value: '' } })
-    await act(async () => { vi.advanceTimersByTime(500) })
     expect(fetchMatchPage).toHaveBeenCalledTimes(1)
-    fireEvent.compositionEnd(input)
-    await act(async () => { vi.advanceTimersByTime(300) })
+    expect(fetchMatchPage).toHaveBeenLastCalledWith(expect.objectContaining({ team: 'Arsenal' }), expect.any(AbortSignal))
+    fireEvent.click(screen.getByRole('button', { name: '搜索' }))
+    await waitFor(() => expect(fetchMatchPage).toHaveBeenCalledTimes(2))
     expect(fetchMatchPage).toHaveBeenLastCalledWith(expect.objectContaining({ team: '' }), expect.any(AbortSignal))
   })
 
@@ -135,14 +139,36 @@ describe('历史比赛页面', () => {
     fireEvent.click(screen.getByRole('button', { name: '下一页' }))
     await screen.findByText('共 380 条')
     fireEvent.change(screen.getByLabelText('联赛'), { target: { value: 'E0' } })
-    await waitFor(() => expect(fetchMatchPage).toHaveBeenLastCalledWith(expect.objectContaining({ competition: 'E0', page: 1 }), expect.any(AbortSignal)))
     fireEvent.change(screen.getByLabelText('赛季'), { target: { value: '2324' } })
+    fireEvent.click(screen.getByRole('button', { name: '搜索' }))
     await waitFor(() => expect(fetchMatchPage).toHaveBeenLastCalledWith(expect.objectContaining({ competition: 'E0', season: '2324', page: 1 }), expect.any(AbortSignal)))
     fireEvent.click(screen.getByRole('button', { name: '清除筛选' }))
     await waitFor(() => expect(fetchMatchPage).toHaveBeenLastCalledWith(expect.objectContaining({ competition: '', season: '', team: '', page: 1 }), expect.any(AbortSignal)))
     vi.mocked(fetchMatchPage).mockResolvedValue({ ...page, page: 19, items: [match] })
     fireEvent.click(screen.getByRole('button', { name: '下一页' }))
     await waitFor(() => expect(screen.getByRole('button', { name: '下一页' })).toBeDisabled())
+  })
+
+  it('shows Chinese competition names and submits draft filters only after search', async () => {
+    render(<HistoryPage />)
+    await screen.findByText('阿森纳 2–1 埃弗顿')
+    expect(screen.getByRole('option', { name: '英超（E0）' })).toBeInTheDocument()
+    expect(fetchMatchPage).toHaveBeenCalledTimes(1)
+
+    fireEvent.change(screen.getByLabelText('联赛'), { target: { value: 'E0' } })
+    fireEvent.change(screen.getByLabelText('开始日期'), { target: { value: '2024-05-01' } })
+    fireEvent.change(screen.getByLabelText('结束日期'), { target: { value: '2024-05-31' } })
+    fireEvent.change(screen.getByLabelText('球队'), { target: { value: 'Arsenal' } })
+    expect(fetchMatchPage).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(screen.getByRole('button', { name: '搜索' }))
+    await waitFor(() => expect(fetchMatchPage).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        competition: 'E0', team: 'Arsenal', startDate: '2024-05-01', endDate: '2024-05-31', page: 1,
+      }),
+      expect.any(AbortSignal),
+    ))
+    expect(window.location.hash).toContain('start_date=2024-05-01')
   })
 
   it('renders compact pagination controls and applies page size changes', async () => {
@@ -185,36 +211,26 @@ describe('历史比赛页面', () => {
     ))
   })
 
-  it('debounces team search for 300ms, respects IME composition, and clears immediately with focus restored', async () => {
+  it('keeps team input as a draft and clears it without issuing a request', async () => {
     render(<HistoryPage />)
     await screen.findByText('阿森纳 2–1 埃弗顿')
-    vi.useFakeTimers()
     const input = screen.getByLabelText('球队')
-    fireEvent.compositionStart(input)
     fireEvent.change(input, { target: { value: 'Arsenal' } })
-    await act(async () => { vi.advanceTimersByTime(500) })
     expect(fetchMatchPage).toHaveBeenCalledTimes(1)
-    fireEvent.keyDown(input, { key: 'Enter', isComposing: true })
+    fireEvent.click(screen.getByRole('button', { name: '清除球队搜索' }))
     expect(fetchMatchPage).toHaveBeenCalledTimes(1)
-    fireEvent.compositionEnd(input)
-    await act(async () => { vi.advanceTimersByTime(299) })
-    expect(fetchMatchPage).toHaveBeenCalledTimes(1)
-    await act(async () => { vi.advanceTimersByTime(1) })
-    expect(fetchMatchPage).toHaveBeenLastCalledWith(expect.objectContaining({ team: 'Arsenal', page: 1 }), expect.any(AbortSignal))
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '清除球队搜索' })) })
-    expect(fetchMatchPage).toHaveBeenLastCalledWith(expect.objectContaining({ team: '', page: 1 }), expect.any(AbortSignal))
     expect(input).toHaveValue('')
     expect(input).toHaveFocus()
   })
 
-  it('submits Enter immediately and cancels older requests even if they later resolve', async () => {
+  it('submits search and cancels older requests even if they later resolve', async () => {
     let resolveOld!: (value: MatchPage) => void
     vi.mocked(fetchMatchPage).mockImplementationOnce(() => new Promise((resolve) => { resolveOld = resolve }))
     const { unmount } = render(<HistoryPage />)
     const oldSignal = vi.mocked(fetchMatchPage).mock.calls[0][1]
     const input = screen.getByLabelText('球队')
     fireEvent.change(input, { target: { value: 'Arsenal' } })
-    fireEvent.keyDown(input, { key: 'Enter' })
+    fireEvent.click(screen.getByRole('button', { name: '搜索' }))
     await screen.findByText('阿森纳 2–1 埃弗顿')
     expect(oldSignal.aborted).toBe(true)
     await act(async () => { resolveOld({ ...page, items: [{ ...match, homeTeam: '过期队名' }] }) })
@@ -247,6 +263,7 @@ describe('历史比赛页面', () => {
     expect(await screen.findByText('尚未导入历史比赛')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '下一页' })).toBeDisabled()
     fireEvent.change(screen.getByLabelText('联赛'), { target: { value: 'E0' } })
+    fireEvent.click(screen.getByRole('button', { name: '搜索' }))
     expect(await screen.findByText('没有符合条件的比赛')).toBeInTheDocument()
     expect(screen.queryByText(/Arsenal/)).not.toBeInTheDocument()
   })

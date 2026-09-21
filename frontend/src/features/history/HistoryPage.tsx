@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
-import { ChevronLeft, ChevronRight, MoreHorizontal } from 'lucide-react'
+import { ChevronLeft, ChevronRight, MoreHorizontal, RefreshCw } from 'lucide-react'
 import { buildHash, hashParams } from '../../routing'
 import { fetchDataSummary, fetchMatchPage } from './api'
 import HistoryFilters from './HistoryFilters'
-import ImportPanel from './ImportPanel'
+import type { HistoryFilterValues } from './HistoryFilters'
 import MatchTable from './MatchTable'
 import type { DataSummary, MatchPage } from './types'
 
@@ -12,7 +12,7 @@ const PAGE_SIZE_OPTIONS = [10, 20, 50] as const
 type PageSize = typeof PAGE_SIZE_OPTIONS[number]
 type PageItem = number | 'ellipsis'
 
-interface Query { competition: string; season: string; team: string; page: number; pageSize: PageSize }
+interface Query extends HistoryFilterValues { page: number; pageSize: PageSize }
 
 function parsePageSize(value: string | null): PageSize {
   const parsed = Number(value)
@@ -42,6 +42,7 @@ function readQuery(): Query {
   return {
     competition: params.get('competition') ?? '', season: params.get('season') ?? '',
     team: params.get('team') ?? '',
+    startDate: params.get('start_date') ?? '', endDate: params.get('end_date') ?? '',
     page: Number.isSafeInteger(requestedPage) && requestedPage > 0 ? requestedPage : 1,
     pageSize: parsePageSize(params.get('page_size')),
   }
@@ -62,15 +63,17 @@ export default function HistoryPage() {
   const [summaryError, setSummaryError] = useState(false)
   const [retry, setRetry] = useState(0)
   const [summaryRetry, setSummaryRetry] = useState(0)
-  const [importOpen, setImportOpen] = useState(false)
 
   const commitQuery = useCallback((change: Partial<Query>) => {
     const next = { ...readQuery(), ...change }
     const url = new URL(window.location.href)
     const params = locationQueryParams()
-    for (const key of ['competition', 'season', 'team'] as const) {
-      if (next[key]) params.set(key, next[key])
-      else params.delete(key)
+    for (const [queryKey, urlKey] of [
+      ['competition', 'competition'], ['season', 'season'], ['team', 'team'],
+      ['startDate', 'start_date'], ['endDate', 'end_date'],
+    ] as const) {
+      if (next[queryKey]) params.set(urlKey, next[queryKey])
+      else params.delete(urlKey)
     }
     if (next.page > 1) params.set('page', String(next.page))
     else params.delete('page')
@@ -85,7 +88,6 @@ export default function HistoryPage() {
     setQuery(next)
   }, [])
 
-  const changeTeam = useCallback((team: string) => commitQuery({ team, page: 1 }), [commitQuery])
   const refreshAfterImport = useCallback(() => {
     setSummaryRetry((value) => value + 1)
     setRetry((value) => value + 1)
@@ -144,7 +146,7 @@ export default function HistoryPage() {
     return () => { window.clearTimeout(timeout); controller.abort() }
   }, [query, retry, commitQuery])
 
-  const hasFilters = Boolean(query.competition || query.season || query.team)
+  const hasFilters = Boolean(query.competition || query.season || query.team || query.startDate || query.endDate)
   const currentPage = result?.page ?? query.page
   const totalPages = result?.totalPages ?? 0
   const paginationItems = pageItems(totalPages, currentPage)
@@ -171,8 +173,8 @@ export default function HistoryPage() {
         <p className="page-summary">查看已导入的赛果与赔率，核对每条市场记录的来源和可用时间。</p>
       </div>
       <div className="page-header-actions">
-        <div className="system-state"><span className="state-dot" aria-hidden="true" />历史数据</div>
-        <button type="button" className="history-button import-trigger" onClick={() => setImportOpen(true)}>导入历史数据</button>
+        <div className="system-state"><span className="state-dot" aria-hidden="true" />中国竞彩 · Sporttery</div>
+        <button type="button" className="history-button" aria-label="刷新竞彩数据" title="刷新竞彩数据" onClick={refreshAfterImport}><RefreshCw size={18} aria-hidden="true" /></button>
       </div>
     </header>
     <section aria-label="数据摘要" className="history-summary">
@@ -190,14 +192,14 @@ export default function HistoryPage() {
         <p className="history-update">最近比赛：{dateText(summary.latestKickoffAt)}<br />最近成功导入：{dateText(summary.latestSuccessfulImportAt)}</p>
       </>}
     </section>
-    <ImportPanel open={importOpen} onClose={() => setImportOpen(false)} onCompleted={refreshAfterImport} />
     <section className="status-board history-board" aria-label="历史比赛查询">
       <HistoryFilters {...query} options={result?.filters ?? { competitions: [], seasons: [] }}
-        onCompetitionChange={(competition) => commitQuery({ competition, page: 1 })}
-        onSeasonChange={(season) => commitQuery({ season, page: 1 })}
-        onTeamChange={changeTeam} onClear={() => commitQuery({ competition: '', season: '', team: '', page: 1 })} />
+        onSearch={(filters) => commitQuery({ ...filters, page: 1 })}
+        onClear={() => commitQuery({
+          competition: '', season: '', team: '', startDate: '', endDate: '', page: 1,
+        })} />
       <p className="history-help">时间按当前设备时区显示。1 / X / 2 为主胜 / 平局 / 客胜赔率；— 表示缺少记录。窄屏可横向滚动表格。</p>
-      <MatchTable key={`${query.competition}/${query.season}/${query.team}/${query.page}/${retry}`}
+      <MatchTable key={`${query.competition}/${query.season}/${query.team}/${query.startDate}/${query.endDate}/${query.page}/${retry}`}
         items={loading || error ? [] : result?.items ?? []}>
         {loading ? <div role="status" aria-label="比赛加载状态">正在加载比赛…</div> : error ? <div role="alert">
           <p>比赛加载失败，请检查数据服务后重试。</p>

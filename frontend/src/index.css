@@ -445,7 +445,7 @@ h2 {
 
 .history-filters {
   display: grid;
-  grid-template-columns: 1fr 1fr minmax(160px, 1.5fr) auto;
+  grid-template-columns: repeat(4, minmax(150px, 1fr));
   align-items: end;
   gap: 16px;
 }
@@ -475,9 +475,14 @@ h2 {
 .history-filters select { cursor: pointer; }
 .history-filters input { padding-right: 42px; }
 .history-team-field label { margin-bottom: 8px; }
+.history-team-field { grid-column: span 2; }
 .history-search-input { position: relative; }
 .history-search-input input::-webkit-search-cancel-button { display: none; }
 .history-button { font-size: 0.8rem; white-space: nowrap; }
+.history-filter-actions { display: flex; align-items: center; gap: 10px; grid-column: span 2; }
+.history-search-button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; color: #ffffff; background: var(--color-pitch); }
+.history-search-button:hover:not(:disabled) { color: #ffffff; background: #105b39; }
+.history-filter-error { grid-column: 1 / -1; margin: -4px 0 0; color: #a3322d; font-size: 0.78rem; }
 .history-button:not(:disabled), .history-clear-search { cursor: pointer; }
 .history-button:hover:not(:disabled), .history-clear-search:hover { background: var(--color-canvas); border-color: var(--color-pitch); }
 .history-button:active:not(:disabled), .history-clear-search:active { background: var(--color-line); }
@@ -945,6 +950,8 @@ h2 {
 
 @media (max-width: 1100px) {
   .history-filters { grid-template-columns: 1fr 1fr; }
+  .history-team-field,
+  .history-filter-actions { grid-column: auto; }
   .quality-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .quality-metric:nth-child(3) { border-right: 0; }
   .quality-metric:nth-child(n + 4) { border-top: 1px solid var(--color-line); }
@@ -956,6 +963,7 @@ h2 {
   .history-board { padding: 16px; }
   .history-summary-counts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .history-filters { grid-template-columns: 1fr; }
+  .history-filter-actions { display: grid; grid-template-columns: 1fr 1fr; }
   .quality-summary-heading { display: grid; }
   .quality-summary-heading > p { max-width: none; }
   .quality-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }

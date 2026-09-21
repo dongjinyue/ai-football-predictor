@@ -31,7 +31,7 @@ interface MatchPageResponse {
   total_items: number
   total_pages: number
   filters: {
-    competitions: string[]
+    competitions: Array<{ code: string; name: string }>
     seasons: string[]
   }
   items: MatchResponse[]
@@ -215,6 +215,8 @@ function buildMatchUrl(filters: MatchFilters): string {
   appendTextFilter(params, 'competition', filters.competition)
   appendTextFilter(params, 'season', filters.season)
   appendTextFilter(params, 'team', filters.team)
+  appendTextFilter(params, 'start_date', filters.startDate)
+  appendTextFilter(params, 'end_date', filters.endDate)
 
   return url.toString()
 }

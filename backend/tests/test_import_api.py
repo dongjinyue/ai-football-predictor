@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -406,7 +406,10 @@ def test_matches_endpoint_returns_stable_page_and_trims_optional_filters() -> No
         page=1,
         total_items=1,
         total_pages=1,
-        filters=SimpleNamespace(competitions=("E0",), seasons=("2324",)),
+        filters=SimpleNamespace(
+            competitions=(SimpleNamespace(code="E0", name="英格兰超级联赛"),),
+            seasons=("2324",),
+        ),
         items=(
             SimpleNamespace(
                 id="match-1",
@@ -447,6 +450,8 @@ def test_matches_endpoint_returns_stable_page_and_trims_optional_filters() -> No
             "competition": " E0 ",
             "season": " 2324 ",
             "team": " Arsenal ",
+            "start_date": "2024-05-01",
+            "end_date": "2024-05-31",
         },
     )
 
@@ -486,7 +491,13 @@ def test_matches_endpoint_returns_stable_page_and_trims_optional_filters() -> No
         ],
     }
     assert repository.match_queries == [
-        MatchQuery(page=1, page_size=20, competition="E0", season="2324", team="Arsenal")
+        MatchQuery(
+            page=1, page_size=20, competition="E0", season="2324", team="Arsenal",
+            start_date=date(2024, 5, 1), end_date=date(2024, 5, 31),
+        )
+    ]
+    assert response.json()["filters"]["competitions"] == [
+        {"code": "E0", "name": "英格兰超级联赛"}
     ]
 
 

@@ -1,4 +1,6 @@
 const competitionNames: Record<string, string> = {
+  'JC0-7358077f': '南美解放者杯附加赛',
+  'JC0-ce1e52e4': '美洲欧洲杯',
   E0: '英超',
   E1: '英冠',
   E2: '英甲',

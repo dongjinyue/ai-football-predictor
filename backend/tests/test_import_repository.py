@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import duckdb
@@ -315,7 +315,26 @@ def test_list_matches_filters_by_competition_code_season_and_case_insensitive_te
     ]
     assert [item.season for item in season_page.items] == ["2425"]
     assert len(team_page.items) == 2
-    assert competition_page.filters.competitions == ("D1", "E0")
+    assert tuple((item.code, item.name) for item in competition_page.filters.competitions) == (
+        ("D1", "German Bundesliga"),
+        ("E0", "English Premier League"),
+    )
+
+
+def test_list_matches_filters_by_inclusive_kickoff_date_range(
+    tmp_path: Path, source_file: SourceFile, parsed_file: ParsedFile
+) -> None:
+    """开始日和结束日都属于查询范围，方便按竞彩比赛日期精确缩小结果。"""
+    repository = ImportRepository(tmp_path / "match-date-filters.duckdb")
+    _import_once(repository, source_file, _two_match_file(parsed_file))
+
+    page = repository.list_matches(MatchQuery(
+        start_date=date(2023, 8, 19),
+        end_date=date(2023, 8, 19),
+    ))
+
+    assert page.total_items == 1
+    assert page.items[0].home_team == "Chelsea"
 
 
 def test_list_matches_returns_empty_page_for_unknown_or_literal_wildcard_filter(

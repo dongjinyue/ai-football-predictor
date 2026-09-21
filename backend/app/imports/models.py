@@ -1,7 +1,7 @@
 """导入流程各层共享的不可变领域记录。"""
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 
 
 @dataclass(frozen=True)
@@ -196,6 +196,8 @@ class MatchQuery:
     competition: str | None = None
     season: str | None = None
     team: str | None = None
+    start_date: date | None = None
+    end_date: date | None = None
 
 
 @dataclass(frozen=True)
@@ -279,10 +281,18 @@ class MatchMarketHistoryView:
 
 
 @dataclass(frozen=True)
+class CompetitionFilterOption:
+    """联赛筛选项保留稳定代码，同时提供用户可读名称。"""
+
+    code: str
+    name: str
+
+
+@dataclass(frozen=True)
 class MatchFilterOptions:
     """历史比赛浏览器可选的来源联赛代码与赛季，均为稳定排序的文本。"""
 
-    competitions: tuple[str, ...]
+    competitions: tuple[CompetitionFilterOption, ...]
     seasons: tuple[str, ...]
 
 

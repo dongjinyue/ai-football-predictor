@@ -33,13 +33,16 @@ describe('历史数据 API 客户端', () => {
     const controller = new AbortController()
 
     await fetchMatchPage(
-      { page: 2, pageSize: 20, competition: 'E0', season: '2324', team: 'Man Utd' },
+      {
+        page: 2, pageSize: 20, competition: 'E0', season: '2324', team: 'Man Utd',
+        startDate: '2024-05-01', endDate: '2024-05-31',
+      },
       controller.signal,
     )
 
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining(
-        'page=2&page_size=20&competition=E0&season=2324&team=Man+Utd',
+        'page=2&page_size=20&competition=E0&season=2324&team=Man+Utd&start_date=2024-05-01&end_date=2024-05-31',
       ),
       { signal: controller.signal },
     )
@@ -53,7 +56,7 @@ describe('历史数据 API 客户端', () => {
         page_size: 20,
         total_items: 1,
         total_pages: 1,
-        filters: { competitions: ['E0'], seasons: ['2324'] },
+        filters: { competitions: [{ code: 'E0', name: '英格兰超级联赛' }], seasons: ['2324'] },
         items: [
           {
             id: 'match-1',
@@ -117,6 +120,7 @@ describe('历史数据 API 客户端', () => {
       line: null,
       outcomes: [{ outcomeCode: 'H', odds: 1.5 }],
     })
+    expect(page.filters.competitions).toEqual([{ code: 'E0', name: '英格兰超级联赛' }])
   })
 
   it('对非 2xx 响应抛出统一的 DataRequestError', async () => {

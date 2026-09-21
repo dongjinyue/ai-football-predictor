@@ -14,6 +14,7 @@ from pathlib import Path
 import duckdb
 
 from app.imports.models import (
+    CompetitionFilterOption,
     DataAuditMarketCoverage,
     DataAuditReport,
     DataAuditScope,
@@ -668,12 +669,13 @@ class ImportRepository:
             ).fetchall()
             filters = MatchFilterOptions(
                 competitions=tuple(
-                    row[0]
+                    CompetitionFilterOption(code=row[0], name=row[1])
                     for row in connection.execute(
                         """
-                        SELECT DISTINCT source_competition_id
+                        SELECT source_competition_id, min(name_zh)
                         FROM competitions
                         WHERE (? IS NULL OR source = ?)
+                        GROUP BY source_competition_id
                         ORDER BY source_competition_id
                         """, [query.source, query.source]
                     ).fetchall()
@@ -1641,10 +1643,10 @@ def _epoch_milliseconds(value: datetime) -> int:
     return int(value.timestamp() * 1000)
 
 
-def _match_filter_sql(query: MatchQuery) -> tuple[list[str], list[str]]:
+def _match_filter_sql(query: MatchQuery) -> tuple[list[str], list[object]]:
     """构造参数化筛选片段；球队关键词中的 LIKE 元字符按普通文本处理。"""
     conditions: list[str] = []
-    parameters: list[str] = []
+    parameters: list[object] = []
     if query.source:
         conditions.append("match.source = ?")
         parameters.append(query.source)
@@ -1660,6 +1662,12 @@ def _match_filter_sql(query: MatchQuery) -> tuple[list[str], list[str]]:
             "(lower(home.name_zh) LIKE ? ESCAPE '\\' OR lower(away.name_zh) LIKE ? ESCAPE '\\')"
         )
         parameters.extend((team_pattern, team_pattern))
+    if query.start_date:
+        conditions.append("CAST(match.kickoff_at AT TIME ZONE 'Asia/Shanghai' AS DATE) >= ?")
+        parameters.append(query.start_date)
+    if query.end_date:
+        conditions.append("CAST(match.kickoff_at AT TIME ZONE 'Asia/Shanghai' AS DATE) <= ?")
+        parameters.append(query.end_date)
     return conditions, parameters
 
 

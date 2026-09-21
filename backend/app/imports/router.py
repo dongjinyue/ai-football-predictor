@@ -244,10 +244,17 @@ class HistoricalMatchResponse(BaseModel):
     markets: tuple[MatchMarketResponse, ...]
 
 
-class FilterOptionResponse(BaseModel):
-    """当前数据库可用的来源联赛代码和赛季筛选项。"""
+class CompetitionFilterOptionResponse(BaseModel):
+    """联赛筛选项：代码用于查询，名称用于界面展示。"""
 
-    competitions: tuple[str, ...]
+    code: str
+    name: str
+
+
+class FilterOptionResponse(BaseModel):
+    """当前数据库可用的联赛和赛季筛选项。"""
+
+    competitions: tuple[CompetitionFilterOptionResponse, ...]
     seasons: tuple[str, ...]
 
 
@@ -432,8 +439,12 @@ def create_import_router(
         season: str | None = None,
         team: str | None = None,
         source: str | None = None,
+        start_date: date | None = None,
+        end_date: date | None = None,
     ) -> MatchPageResponse:
         """按安全分页与规范化筛选读取历史比赛，不暴露底层数据库异常。"""
+        if start_date and end_date and start_date > end_date:
+            raise HTTPException(status_code=422, detail="invalid_date_range")
         query = MatchQuery(
             page=page,
             page_size=page_size,
@@ -441,6 +452,8 @@ def create_import_router(
             season=_optional_filter(season),
             team=_optional_filter(team),
             source=_optional_filter(source),
+            start_date=start_date,
+            end_date=end_date,
         )
         try:
             resolved_repository = (
@@ -569,7 +582,10 @@ def _match_page_response(page: MatchPage, page_size: int) -> MatchPageResponse:
         total_items=page.total_items,
         total_pages=page.total_pages,
         filters=FilterOptionResponse(
-            competitions=page.filters.competitions,
+            competitions=tuple(
+                CompetitionFilterOptionResponse(code=item.code, name=item.name)
+                for item in page.filters.competitions
+            ),
             seasons=page.filters.seasons,
         ),
         items=tuple(_historical_match_response(item) for item in page.items),

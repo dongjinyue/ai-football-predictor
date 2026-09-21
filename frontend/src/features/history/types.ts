@@ -9,6 +9,8 @@ export interface MatchFilters {
   competition?: string
   season?: string
   team?: string
+  startDate?: string
+  endDate?: string
 }
 
 export interface MarketOutcome {
@@ -112,7 +114,7 @@ export interface ImportJob {
 }
 
 export interface MatchFilterOptions {
-  competitions: string[]
+  competitions: Array<{ code: string; name: string }>
   seasons: string[]
 }
 
