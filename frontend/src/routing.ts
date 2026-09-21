@@ -50,9 +50,14 @@ export function matchDetailRoute(
   const match = hashRoute(value).match(/^history\/match\/([^/]+)$/)
   if (!match) return null
   try {
+    const requestedReturn = hashParams(value).get('return')
+    // 返回目标只允许历史列表及其筛选参数，不能把地址栏输入变成任意可执行链接。
+    const returnHash = requestedReturn === '#history' || requestedReturn?.startsWith('#history?')
+      ? requestedReturn
+      : '#history'
     return {
       matchId: decodeURIComponent(match[1]),
-      returnHash: hashParams(value).get('return') || '#history',
+      returnHash,
     }
   } catch {
     return null

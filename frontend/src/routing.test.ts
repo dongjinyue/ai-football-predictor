@@ -16,6 +16,13 @@ describe('比赛详情哈希路由', () => {
     })
   })
 
+  it('拒绝历史列表以外的返回地址', () => {
+    expect(matchDetailRoute('#history/match/abc?return=javascript%3Aalert(1)')).toEqual({
+      matchId: 'abc',
+      returnHash: '#history',
+    })
+  })
+
   it('畸形比赛 ID 编码不会让应用崩溃', () => {
     expect(matchDetailRoute('#history/match/%E0%A4%A')).toBeNull()
   })
