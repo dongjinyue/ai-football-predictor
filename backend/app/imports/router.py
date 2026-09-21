@@ -29,6 +29,7 @@ from app.imports.models import (
     ImportRunAudit,
     ImportRunResult,
     MatchPage,
+    MatchMarketHistoryView,
     MatchQuery,
     SourceFile,
 )
@@ -47,7 +48,7 @@ class _ImportService(Protocol):
 class _ImportRepository(Protocol):
     def latest_run(self) -> ImportRunAudit | None: ...
 
-    def data_summary(self) -> dict[str, object]: ...
+    def data_summary(self, source: str | None = None) -> dict[str, object]: ...
 
     def data_audit(
         self,
@@ -57,6 +58,8 @@ class _ImportRepository(Protocol):
     ) -> DataAuditReport: ...
 
     def list_matches(self, query: MatchQuery) -> MatchPage: ...
+
+    def get_match_market_history(self, match_id: str) -> MatchMarketHistoryView | None: ...
 
 
 class _ImportJobManager(Protocol):
@@ -259,6 +262,45 @@ class MatchPageResponse(BaseModel):
     items: tuple[HistoricalMatchResponse, ...]
 
 
+class MarketHistorySnapshotResponse(BaseModel):
+    """一个官方发布时间下的全部可用赔率。"""
+
+    captured_at: datetime
+    available_at: datetime
+    outcomes: tuple[MarketOutcomeResponse, ...]
+
+
+class MarketHistoryGroupResponse(BaseModel):
+    """同一玩法和盘口的完整时间线。"""
+
+    market_type: str
+    line: float | None
+    source: str
+    provider: str
+    stage: str
+    time_precision: str
+    outcome_codes: tuple[str, ...]
+    snapshots: tuple[MarketHistorySnapshotResponse, ...]
+
+
+class MatchMarketHistoryResponse(BaseModel):
+    """单场比赛的身份、赛果和竞彩彩票赔率时间线。"""
+
+    id: str
+    competition_code: str
+    competition_name: str
+    season: str
+    kickoff_at: datetime
+    kickoff_time_precision: Literal["exact", "date_only"]
+    home_team: str
+    away_team: str
+    half_time_home_score: int | None
+    half_time_away_score: int | None
+    home_score: int | None
+    away_score: int | None
+    markets: tuple[MarketHistoryGroupResponse, ...]
+
+
 def create_import_router(
     service: _ImportService | None = None,
     repository: _ImportRepository | None = None,
@@ -350,12 +392,15 @@ def create_import_router(
         return LatestRunResponse(latest_run=_latest_run_response(result) if result else None)
 
     @router.get("/summary", response_model=DataSummaryResponse)
-    def data_summary(request: Request) -> DataSummaryResponse:
+    def data_summary(request: Request, source: str | None = None) -> DataSummaryResponse:
         try:
             resolved_repository = (
                 repository if repository is not None else request.app.state.import_repository
             )
-            return DataSummaryResponse.model_validate(resolved_repository.data_summary())
+            selected_source = _optional_filter(source)
+            result = (resolved_repository.data_summary(source=selected_source)
+                      if selected_source else resolved_repository.data_summary())
+            return DataSummaryResponse.model_validate(result)
         except Exception:
             logger.exception("读取历史数据摘要失败")
             raise HTTPException(status_code=500, detail="internal_error") from None
@@ -386,6 +431,7 @@ def create_import_router(
         competition: str | None = None,
         season: str | None = None,
         team: str | None = None,
+        source: str | None = None,
     ) -> MatchPageResponse:
         """按安全分页与规范化筛选读取历史比赛，不暴露底层数据库异常。"""
         query = MatchQuery(
@@ -394,6 +440,7 @@ def create_import_router(
             competition=_optional_filter(competition),
             season=_optional_filter(season),
             team=_optional_filter(team),
+            source=_optional_filter(source),
         )
         try:
             resolved_repository = (
@@ -404,6 +451,27 @@ def create_import_router(
             logger.exception("读取历史比赛分页失败")
             raise HTTPException(status_code=500, detail="internal_error") from None
         return _match_page_response(result, page_size=query.page_size)
+
+    @router.get(
+        "/matches/{match_id}/market-history",
+        response_model=MatchMarketHistoryResponse,
+    )
+    def get_match_market_history(
+        match_id: str,
+        request: Request,
+    ) -> MatchMarketHistoryResponse:
+        """读取单场比赛的完整体彩赔率时间线。"""
+        try:
+            resolved_repository = (
+                repository if repository is not None else request.app.state.import_repository
+            )
+            result = resolved_repository.get_match_market_history(match_id)
+        except Exception:
+            logger.exception("读取单场竞彩彩票赔率时间线失败")
+            raise HTTPException(status_code=500, detail="internal_error") from None
+        if result is None:
+            raise HTTPException(status_code=404, detail="match_not_found")
+        return _match_market_history_response(result)
 
     return router
 
@@ -541,6 +609,49 @@ def _historical_match_response(match: HistoricalMatchView) -> HistoricalMatchRes
                 outcomes=tuple(
                     MarketOutcomeResponse(outcome_code=outcome_code, odds=odds)
                     for outcome_code, odds in market.outcomes
+                ),
+            )
+            for market in match.markets
+        ),
+    )
+
+
+def _match_market_history_response(
+    match: MatchMarketHistoryView,
+) -> MatchMarketHistoryResponse:
+    """显式映射领域视图，避免向客户端泄露数据库行结构。"""
+    return MatchMarketHistoryResponse(
+        id=match.id,
+        competition_code=match.competition_code,
+        competition_name=match.competition_name,
+        season=match.season,
+        kickoff_at=match.kickoff_at,
+        kickoff_time_precision=match.kickoff_time_precision,
+        home_team=match.home_team,
+        away_team=match.away_team,
+        half_time_home_score=match.half_time_home_score,
+        half_time_away_score=match.half_time_away_score,
+        home_score=match.home_score,
+        away_score=match.away_score,
+        markets=tuple(
+            MarketHistoryGroupResponse(
+                market_type=market.market_type,
+                line=market.line,
+                source=market.source,
+                provider=market.provider,
+                stage=market.stage,
+                time_precision=market.time_precision,
+                outcome_codes=market.outcome_codes,
+                snapshots=tuple(
+                    MarketHistorySnapshotResponse(
+                        captured_at=snapshot.captured_at,
+                        available_at=snapshot.available_at,
+                        outcomes=tuple(
+                            MarketOutcomeResponse(outcome_code=code, odds=odds)
+                            for code, odds in snapshot.outcomes
+                        ),
+                    )
+                    for snapshot in market.snapshots
                 ),
             )
             for market in match.markets

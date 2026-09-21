@@ -7,7 +7,15 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.imports.models import ImportRequestScope, ImportRunAudit, ImportRunResult, MatchQuery
+from app.imports.models import (
+    ImportRequestScope,
+    ImportRunAudit,
+    ImportRunResult,
+    MarketHistoryGroupView,
+    MarketHistorySnapshotView,
+    MatchMarketHistoryView,
+    MatchQuery,
+)
 from app.imports.router import create_import_router
 from app.main import create_app
 
@@ -34,6 +42,7 @@ class FakeRepository:
         self,
         latest: ImportRunAudit | None = None,
         matches: object | None = None,
+        market_history: MatchMarketHistoryView | None = None,
         error: Exception | None = None,
     ) -> None:
         self._latest = latest
@@ -45,6 +54,7 @@ class FakeRepository:
             items=(),
         )
         self._error = error
+        self.market_history = market_history
         self.match_queries = []
 
     def latest_run(self) -> ImportRunAudit | None:
@@ -66,6 +76,53 @@ class FakeRepository:
         if self._error:
             raise self._error
         return self._matches
+
+    def get_match_market_history(self, match_id: str):
+        if self._error:
+            raise self._error
+        return self.market_history
+
+
+def _market_history_fixture(*, markets: tuple[MarketHistoryGroupView, ...] | None = None):
+    snapshots = (
+        MarketHistorySnapshotView(
+            captured_at=datetime(2015, 1, 1, 0, tzinfo=timezone.utc),
+            available_at=datetime(2015, 1, 1, 0, tzinfo=timezone.utc),
+            outcomes=(("home", 2.1), ("draw", 3.1), ("away", 3.4)),
+        ),
+        MarketHistorySnapshotView(
+            captured_at=datetime(2015, 1, 1, 2, tzinfo=timezone.utc),
+            available_at=datetime(2015, 1, 1, 2, tzinfo=timezone.utc),
+            outcomes=(("home", 2.0), ("draw", 3.2), ("away", 3.5)),
+        ),
+    )
+    default_markets = (
+        MarketHistoryGroupView(
+            market_type="match_result",
+            line=None,
+            source="sporttery",
+            provider="china_sports_lottery",
+            stage="closing",
+            time_precision="exact",
+            outcome_codes=("home", "draw", "away"),
+            snapshots=snapshots,
+        ),
+    )
+    return MatchMarketHistoryView(
+        id="sporttery:70001",
+        competition_code="JC25",
+        competition_name="英超",
+        season="2015",
+        kickoff_at=datetime(2015, 1, 2, 12, tzinfo=timezone.utc),
+        kickoff_time_precision="date_only",
+        home_team="主队",
+        away_team="客队",
+        half_time_home_score=0,
+        half_time_away_score=0,
+        home_score=1,
+        away_score=0,
+        markets=default_markets if markets is None else markets,
+    )
 
 
 def build_client(service: FakeImportService | None = None, repository: FakeRepository | None = None) -> TestClient:
@@ -481,6 +538,53 @@ def test_matches_endpoint_hides_unexpected_repository_error_details() -> None:
     response = build_client(
         repository=FakeRepository(error=RuntimeError(r"C:\\secret\\history.duckdb: unavailable"))
     ).get("/api/data/matches")
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "internal_error"}
+
+
+def test_match_market_history_endpoint_returns_full_timeline() -> None:
+    repository = FakeRepository(market_history=_market_history_fixture())
+
+    response = build_client(repository=repository).get(
+        "/api/data/matches/sporttery%3A70001/market-history"
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["id"] == "sporttery:70001"
+    assert payload["markets"][0]["market_type"] == "match_result"
+    assert payload["markets"][0]["outcome_codes"] == ["home", "draw", "away"]
+    assert [row["captured_at"] for row in payload["markets"][0]["snapshots"]] == [
+        "2015-01-01T00:00:00Z",
+        "2015-01-01T02:00:00Z",
+    ]
+
+
+def test_match_market_history_endpoint_returns_known_match_without_markets() -> None:
+    repository = FakeRepository(market_history=_market_history_fixture(markets=()))
+
+    response = build_client(repository=repository).get(
+        "/api/data/matches/sporttery%3A70001/market-history"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["markets"] == []
+
+
+def test_match_market_history_endpoint_returns_404_for_unknown_match() -> None:
+    response = build_client(repository=FakeRepository()).get(
+        "/api/data/matches/missing/market-history"
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "match_not_found"}
+
+
+def test_match_market_history_endpoint_hides_repository_error_details() -> None:
+    response = build_client(repository=FakeRepository(error=RuntimeError("secret path"))).get(
+        "/api/data/matches/sporttery%3A70001/market-history"
+    )
 
     assert response.status_code == 500
     assert response.json() == {"detail": "internal_error"}
