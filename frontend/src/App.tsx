@@ -30,6 +30,7 @@ function App() {
   const [hash, setHash] = useState(() => normalizeLocation(new URL(window.location.href)).hash)
   const activeRoute = hashRoute(hash) || 'today'
   const detailRoute = matchDetailRoute(hash)
+  const isMatchDetail = detailRoute !== null
   const isHistory = activeRoute === 'history' || detailRoute !== null
   const isQuality = activeRoute === 'quality'
 
@@ -59,8 +60,9 @@ function App() {
       quality: '数据质量',
       today: '今日赛事分析',
     }
-    document.title = `${pageTitles[activeRoute] ?? pageTitles.today} · 赛前分析台`
-  }, [activeRoute])
+    const pageTitle = isMatchDetail ? '市场详情' : pageTitles[activeRoute] ?? pageTitles.today
+    document.title = `${pageTitle} · 赛前分析台`
+  }, [activeRoute, isMatchDetail])
 
   return (
     <div className="app-shell">

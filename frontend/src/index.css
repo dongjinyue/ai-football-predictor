@@ -544,12 +544,27 @@ h2 {
 .history-match-facts div { min-width: 0; }
 .history-match-facts dt { color: var(--color-muted); }
 .history-match-facts dd { margin: 6px 0 0; font-family: var(--font-mono); font-size: 1rem; }
-.history-markets { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; }
-.history-market { min-width: 0; }
-.history-market h3 { margin: 0 0 12px; color: var(--color-pitch); font-size: 1rem; }
-.history-market-outcomes { display: flex; gap: 20px; padding-block: 12px; border-block: 1px solid var(--color-line); }
+.history-primary-odd { min-width: 76px; white-space: nowrap; }
+.history-odds-kind { margin: 0 0 5px; color: var(--color-pitch); font-size: 0.68rem; font-weight: 700; }
+.history-markets { display: grid; grid-template-columns: minmax(0, 1fr); }
+.history-market { min-width: 0; padding-block: 20px; border-top: 1px solid var(--color-line); }
+.history-market:first-child { border-top: 0; }
+.history-market-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 10px; }
+.history-market h3 { margin: 0; color: var(--color-pitch); font-size: 1rem; }
+.history-market-heading p { margin: 0; color: var(--color-muted); font-size: 0.78rem; }
+.history-market-outcomes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(76px, 1fr));
+  gap: 1px;
+  padding: 1px;
+  overflow: hidden;
+  border: 1px solid var(--color-line);
+  background: var(--color-line);
+}
+.history-market-outcomes div { min-width: 0; padding: 10px 12px; background: var(--color-surface); }
+.history-market-outcomes dt { overflow-wrap: anywhere; color: var(--color-muted); line-height: 1.35; }
 .history-market-outcomes dd { margin: 6px 0 0; font-family: var(--font-mono); font-size: 1.1rem; }
-.history-provenance { display: grid; gap: 10px; }
+.history-provenance { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px 20px; margin: 14px 0 0; }
 .history-provenance dt { color: var(--color-muted); }
 .history-provenance dd { margin: 3px 0 0; overflow-wrap: anywhere; }
 .history-warning { color: var(--color-warning); line-height: 1.7; }
@@ -782,6 +797,152 @@ h2 {
 .quality-market-list li span:last-child { color: var(--color-muted); font-family: var(--font-mono); font-size: 0.74rem; }
 .quality-muted { margin: 12px 0 0; color: var(--color-muted); }
 
+/* 独立市场详情页让每种玩法拥有完整宽度，避免密集赔率挤在比赛列表中。 */
+.market-history-page {
+  width: 100%;
+  max-width: 1500px;
+  margin: 0 auto;
+}
+
+.back-link {
+  display: inline-flex;
+  min-height: 40px;
+  align-items: center;
+  gap: 8px;
+  color: var(--color-pitch);
+  font-size: 0.86rem;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.back-link:hover { text-decoration: underline; text-underline-offset: 4px; }
+.back-link:focus-visible { outline: 3px solid var(--color-pitch); outline-offset: 4px; }
+
+.market-page-state {
+  margin-top: 32px;
+  padding: clamp(28px, 5vw, 56px) 0;
+  border-block: 1px solid var(--color-line);
+}
+
+.market-page-state h1 { font-size: clamp(2rem, 4vw, 3.6rem); }
+.market-page-state > p:last-of-type { color: var(--color-muted); line-height: 1.7; }
+.market-page-state .history-button { margin-top: 16px; }
+
+.market-match-header {
+  margin-top: 22px;
+  padding: clamp(26px, 4vw, 48px) 0 30px;
+  border-bottom: 1px solid var(--color-line);
+}
+
+.market-match-header h1 {
+  max-width: 1100px;
+  font-size: clamp(2rem, 4vw, 4.15rem);
+  line-height: 1.08;
+}
+
+.market-match-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  max-width: 1080px;
+  margin: 28px 0 0;
+  border-block: 1px solid var(--color-line);
+}
+
+.market-match-summary div { min-width: 0; padding: 16px 18px; border-right: 1px solid var(--color-line); }
+.market-match-summary div:first-child { padding-left: 0; }
+.market-match-summary div:last-child { border-right: 0; }
+.market-match-summary dt { color: var(--color-muted); font-size: 0.75rem; }
+.market-match-summary dd { margin: 7px 0 0; font-family: var(--font-mono); font-size: 0.98rem; font-weight: 700; }
+
+.market-empty-state { margin-top: 32px; padding: 32px 0; border-block: 1px solid var(--color-line); color: var(--color-muted); }
+.market-history-sections { margin-top: 16px; }
+
+.market-history-section {
+  padding: 30px 0 36px;
+  border-bottom: 1px solid var(--color-line);
+}
+
+.market-history-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 28px;
+  margin-bottom: 18px;
+}
+
+.market-history-heading h2 { margin: 0; font-size: clamp(1.25rem, 2vw, 1.65rem); }
+.market-line { margin: 7px 0 0; color: var(--color-pitch); font-family: var(--font-mono); font-size: 0.78rem; font-weight: 700; }
+
+.market-provenance {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px 24px;
+  margin: 0;
+  text-align: right;
+}
+
+.market-provenance div { display: flex; gap: 7px; }
+.market-provenance dt { color: var(--color-muted); font-size: 0.72rem; }
+.market-provenance dd { margin: 0; font-size: 0.75rem; font-weight: 700; }
+
+/* 比分等玩法列数很多，只让表格区域横向滚动，不撑宽整个页面。 */
+.odds-timeline-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  scrollbar-gutter: stable;
+}
+
+.odds-timeline-scroll:focus-visible { outline: 3px solid var(--color-pitch); outline-offset: 3px; }
+
+.odds-timeline-table {
+  width: 100%;
+  min-width: max(720px, calc(168px + var(--outcome-count, 3) * 88px));
+  border-collapse: separate;
+  border-spacing: 0;
+  table-layout: fixed;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  text-align: center;
+}
+
+.odds-timeline-table th,
+.odds-timeline-table td {
+  width: 88px;
+  height: 48px;
+  padding: 10px 12px;
+  border-right: 1px solid var(--color-line);
+  border-bottom: 1px solid var(--color-line);
+  white-space: nowrap;
+}
+
+.odds-timeline-table tr:last-child th,
+.odds-timeline-table tr:last-child td { border-bottom: 0; }
+.odds-timeline-table th:last-child,
+.odds-timeline-table td:last-child { border-right: 0; }
+.odds-timeline-table thead th { color: var(--color-muted); background: #eef3ee; font-size: 0.72rem; }
+.odds-timeline-table tbody tr:hover td,
+.odds-timeline-table tbody tr:hover th { background: #f7faf7; }
+
+.odds-timeline-table th:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  width: 168px;
+  min-width: 168px;
+  background: var(--color-surface);
+  text-align: left;
+}
+
+.odds-timeline-table thead th:first-child { z-index: 3; background: #eef3ee; }
+.odds-timeline-table td > span:first-child { display: inline-block; min-width: 38px; }
+.odds-direction { display: inline-flex; margin-left: 3px; vertical-align: -2px; }
+.odds-up { color: #b83a32; }
+.odds-down { color: #2567a5; }
+
 @media (max-width: 1100px) {
   .history-filters { grid-template-columns: 1fr 1fr; }
   .quality-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
@@ -818,6 +979,14 @@ h2 {
   .history-pagination-total { flex: 1 1 auto; }
   .history-page-controls { order: 3; flex-basis: 100%; justify-content: flex-start; overflow-x: auto; padding: 4px 0; }
   .history-page-jump { margin-left: auto; }
+  .market-match-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .market-match-summary div { padding-left: 0; border-right: 0; }
+  .market-match-summary div:nth-child(odd) { padding-right: 12px; border-right: 1px solid var(--color-line); }
+  .market-match-summary div:nth-child(n + 3) { border-top: 1px solid var(--color-line); }
+  .market-history-heading { display: grid; gap: 12px; }
+  .market-provenance { justify-content: flex-start; text-align: left; }
+  .odds-timeline-table { min-width: max(640px, calc(144px + var(--outcome-count, 3) * 80px)); }
+  .odds-timeline-table th:first-child { width: 144px; min-width: 144px; }
 }
 
 @media (max-width: 860px) {

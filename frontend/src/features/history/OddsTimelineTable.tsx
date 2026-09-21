@@ -1,4 +1,5 @@
 import { ArrowDown, ArrowUp } from 'lucide-react'
+import type { CSSProperties } from 'react'
 
 import { historyOutcomeLabel, marketHistoryLabels } from './display'
 import type { MarketHistoryGroup, MarketHistorySnapshot } from './types'
@@ -51,7 +52,10 @@ export default function OddsTimelineTable({ market }: { market: MarketHistoryGro
     aria-label={`${title}赔率时间线`}
     tabIndex={0}
   >
-    <table className="odds-timeline-table">
+    <table
+      className="odds-timeline-table"
+      style={{ '--outcome-count': market.outcomeCodes.length } as CSSProperties}
+    >
       <caption className="sr-only">{title}赔率发布时间变化</caption>
       <thead><tr>
         <th scope="col">发布时间</th>

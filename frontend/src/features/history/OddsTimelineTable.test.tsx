@@ -86,6 +86,15 @@ describe('赔率时间线表格', () => {
     ])
   })
 
+  it('把实际结果列数传给样式以计算宽表最小宽度', () => {
+    render(<OddsTimelineTable market={market({
+      marketType: 'correct_score',
+      outcomeCodes: ['1_0', '2_0', '2_1', 'other_home'],
+    })} />)
+
+    expect(screen.getByRole('table')).toHaveStyle({ '--outcome-count': '4' })
+  })
+
   it('只有让球市场时仍显示盘口和来源信息', () => {
     render(<MarketHistorySection market={market({ marketType: 'handicap_result', line: -1 })} />)
 

@@ -31,6 +31,7 @@ describe('Dashboard shell', () => {
     render(<App />)
 
     expect(await screen.findByRole('heading', { name: '主队 1–0 客队' })).toBeInTheDocument()
+    expect(document.title).toBe('市场详情 · 赛前分析台')
     expect(screen.getByRole('link', { name: '历史比赛' })).toHaveAttribute('aria-current', 'page')
     expect(screen.getByRole('link', { name: '返回历史比赛' })).toHaveAttribute('href', '#history?season=2015')
   })
