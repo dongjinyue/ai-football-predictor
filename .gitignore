@@ -16,6 +16,7 @@ venv/
 
 # Local runtime logs, browser profiles, screenshots, and test copies
 .runtime/
+.worktrees/
 
 # Frontend
 node_modules/
