@@ -13,6 +13,7 @@ from app.sporttery.client import (
     SourceBusinessError,
     SportteryClient,
 )
+from app.sporttery.preview import PREVIEW_DATASETS
 
 
 SUCCESS = {
@@ -69,6 +70,60 @@ def test_fixed_bonus_uses_match_id_and_client_code() -> None:
 
     assert seen[0].url.path.endswith("/getFixedBonusV1.qry")
     assert dict(seen[0].url.params) == {"clientCode": "3001", "matchId": "62373"}
+
+
+def test_preview_requests_use_official_endpoint_parameters() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={
+            "success": True,
+            "errorCode": "0",
+            "emptyFlag": False,
+            "value": {"home": {}},
+        })
+
+    client = SportteryClient(_http_client(handler), sleep=lambda _: None)
+    for dataset in PREVIEW_DATASETS:
+        client.fetch_preview(dataset, 2041615)
+
+    assert [(request.url.path.rsplit("/", 1)[-1], dict(request.url.params)) for request in seen] == [
+        ("getMatchFeatureV1.qry", {"termLimits": "10", "sportteryMatchId": "2041615"}),
+        ("getResultHistoryV1.qry", {
+            "sportteryMatchId": "2041615", "termLimits": "10",
+            "tournamentFlag": "0", "homeAwayFlag": "0",
+        }),
+        ("getMatchTablesV2.qry", {"gmMatchId": "2041615"}),
+        ("getMatchResultV1.qry", {
+            "sportteryMatchId": "2041615", "termLimits": "10",
+            "tournamentFlag": "0", "homeAwayFlag": "0",
+        }),
+        ("getFutureMatchesV1.qry", {"sportteryMatchId": "2041615", "termLimits": "4"}),
+        ("getMatchPlayerV1.qry", {"sportteryMatchId": "2041615", "termLimits": "3"}),
+        ("getInjurySuspensionV1.qry", {"sportteryMatchId": "2041615"}),
+    ]
+
+
+def test_preview_accepts_successful_empty_value() -> None:
+    client = SportteryClient(
+        _http_client(lambda request: httpx.Response(200, json={
+            "success": True,
+            "errorCode": "0",
+            "emptyFlag": True,
+            "value": None,
+        })),
+        sleep=lambda _: None,
+    )
+
+    payload = client.fetch_preview(PREVIEW_DATASETS[0], 2041615)
+
+    assert payload.data["emptyFlag"] is True
+
+
+def test_preview_rejects_non_positive_match_id() -> None:
+    with pytest.raises(ValueError, match="invalid_match_id"):
+        SportteryClient(sleep=lambda _: None).fetch_preview(PREVIEW_DATASETS[0], 0)
 
 
 def test_http_567_stops_immediately_without_retrying() -> None:

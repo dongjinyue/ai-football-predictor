@@ -12,12 +12,14 @@ from zoneinfo import ZoneInfo
 
 import duckdb
 
+from app.config import PROJECT_ROOT
 from app.sporttery.models import (
     BonusSnapshot,
     FixedBonusRecord,
     MatchPageRecord,
     SportteryMatch,
 )
+from app.sporttery.preview import is_preview_dataset
 from app.sporttery.storage import StoredResponse
 from app.storage import initialize_database
 
@@ -36,6 +38,9 @@ class CoverageReport:
     outcomes: int
     request_records: int
     snapshots_by_market: tuple[tuple[str, int], ...]
+    completed_preview: int = 0
+    empty_preview: int = 0
+    preview_by_dataset: tuple[tuple[str, tuple[int, int]], ...] = ()
 
 
 class SynchronizedSportteryRepository:
@@ -52,6 +57,16 @@ class SynchronizedSportteryRepository:
     def import_fixed_bonus(self, record: FixedBonusRecord, raw: StoredResponse) -> None:
         with self._lock:
             self._repository.import_fixed_bonus(record, raw)
+
+    def import_preview_source(
+        self,
+        match_id: int,
+        dataset: str,
+        status: str,
+        raw: StoredResponse,
+    ) -> None:
+        with self._lock:
+            self._repository.import_preview_source(match_id, dataset, status, raw)
 
     def coverage_report(self, year: int) -> CoverageReport:
         with self._lock:
@@ -136,6 +151,51 @@ class SportteryRepository:
                         ],
                     )
                 self._insert_request(connection, "match_list", raw)
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+            else:
+                connection.execute("COMMIT")
+
+    def import_preview_source(
+        self,
+        match_id: int,
+        dataset: str,
+        status: str,
+        raw: StoredResponse,
+    ) -> None:
+        """登记一场比赛的一个前瞻原始响应，重复导入保持幂等。"""
+        if not is_preview_dataset(dataset):
+            raise ValueError("invalid_preview_dataset")
+        if status not in {"completed", "empty"}:
+            raise ValueError("invalid_preview_status")
+        with duckdb.connect(str(self.database_path)) as connection:
+            connection.execute("BEGIN TRANSACTION")
+            try:
+                exists = connection.execute(
+                    "SELECT 1 FROM sporttery_matches WHERE match_id = ?", [match_id]
+                ).fetchone()
+                if exists is None:
+                    raise ValueError("unknown_match")
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO sporttery_preview_sources
+                        (match_id, dataset, status, request_url, local_path,
+                         sha256, status_code, fetched_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        match_id,
+                        dataset,
+                        status,
+                        raw.request_url,
+                        _portable_raw_path(raw.path),
+                        raw.sha256,
+                        raw.status_code,
+                        raw.fetched_at,
+                    ],
+                )
+                self._insert_request(connection, f"preview:{dataset}", raw)
             except Exception:
                 connection.execute("ROLLBACK")
                 raise
@@ -246,6 +306,35 @@ class SportteryRepository:
             requests = int(connection.execute(
                 "SELECT COUNT(*) FROM sporttery_requests WHERE year(fetched_at) >= 2000"
             ).fetchone()[0])
+            completed_preview, empty_preview = connection.execute(
+                """
+                SELECT
+                    COUNT(*) FILTER (WHERE source.status = 'completed'),
+                    COUNT(*) FILTER (WHERE source.status = 'empty')
+                FROM sporttery_preview_sources AS source
+                JOIN sporttery_matches AS match ON match.match_id = source.match_id
+                WHERE year(match.match_date) = ?
+                """,
+                [year],
+            ).fetchone()
+            preview_by_dataset = tuple(
+                (
+                    str(row[0]),
+                    (int(row[1]), int(row[2])),
+                )
+                for row in connection.execute(
+                    """
+                    SELECT dataset,
+                           COUNT(*) FILTER (WHERE status = 'completed'),
+                           COUNT(*) FILTER (WHERE status = 'empty')
+                    FROM sporttery_preview_sources AS source
+                    JOIN sporttery_matches AS match ON match.match_id = source.match_id
+                    WHERE year(match.match_date) = ?
+                    GROUP BY dataset ORDER BY dataset
+                    """,
+                    [year],
+                ).fetchall()
+            )
         return CoverageReport(
             year=year,
             matches=match_count,
@@ -254,6 +343,9 @@ class SportteryRepository:
             outcomes=int(outcomes),
             request_records=requests,
             snapshots_by_market=by_market,
+            completed_preview=int(completed_preview),
+            empty_preview=int(empty_preview),
+            preview_by_dataset=preview_by_dataset,
         )
 
     @staticmethod
@@ -423,6 +515,16 @@ class SportteryRepository:
 
 def _stable_id(kind: str, *parts: str) -> str:
     return str(uuid.uuid5(_NAMESPACE, ":".join((kind, *parts))))
+
+
+def _portable_raw_path(path: Path) -> str:
+    """将项目原始目录内的绝对路径转换为可移植的相对路径。"""
+    raw_root = (PROJECT_ROOT / "data" / "raw" / "sporttery").resolve()
+    try:
+        relative = path.resolve().relative_to(raw_root)
+    except ValueError:
+        return path.as_posix()
+    return Path("data", "raw", "sporttery", relative).as_posix()
 
 
 def _insert_rows(connection, statement: str, row_template: str, rows: list[list[object]]) -> None:

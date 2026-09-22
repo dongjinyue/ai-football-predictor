@@ -13,8 +13,10 @@ from app.sporttery.models import HttpPayload
 from app.sporttery.storage import (
     CheckpointStore,
     CollectionCheckpoint,
+    PreviewDatasetCheckpoint,
     RawResponseStore,
     StorageError,
+    get_preview_checkpoint,
 )
 
 
@@ -103,6 +105,26 @@ def test_atomic_write_retries_a_transient_windows_replace_denial(
     assert list(tmp_path.rglob("*.part")) == []
 
 
+def test_atomic_write_survives_a_longer_windows_lock(tmp_path, monkeypatch) -> None:
+    """Windows 扫描器占用数秒时，检查点写入也应继续重试而非丢失任务。"""
+    original_replace = Path.replace
+    attempts = 0
+
+    def flaky_replace(path: Path, target: Path):
+        nonlocal attempts
+        attempts += 1
+        if attempts <= 5:
+            raise PermissionError("temporarily locked")
+        return original_replace(path, target)
+
+    monkeypatch.setattr(Path, "replace", flaky_replace)
+    monkeypatch.setattr("app.sporttery.storage.time.sleep", lambda _: None)
+
+    CheckpointStore(tmp_path).save(CollectionCheckpoint(year=2015))
+
+    assert attempts == 6
+
+
 def test_checkpoint_corruption_is_not_silently_reset(tmp_path) -> None:
     path = tmp_path / "checkpoints" / "2015.json"
     path.parent.mkdir(parents=True)
@@ -110,3 +132,58 @@ def test_checkpoint_corruption_is_not_silently_reset(tmp_path) -> None:
 
     with pytest.raises(StorageError, match="invalid_checkpoint"):
         CheckpointStore(tmp_path).load(2015)
+
+
+def test_preview_checkpoint_round_trip_sorts_ids_and_datasets(tmp_path) -> None:
+    store = CheckpointStore(tmp_path)
+    checkpoint = CollectionCheckpoint(
+        year=2015,
+        preview_datasets=(PreviewDatasetCheckpoint(
+            dataset="match_feature",
+            completed_ids=(2041615, 62373, 62373),
+            empty_ids=(62374,),
+            failed_ids=(62375,),
+        ),),
+    )
+
+    store.save(checkpoint)
+    loaded = store.load(2015)
+
+    state = get_preview_checkpoint(loaded, "match_feature")
+    assert state.completed_ids == (62373, 2041615)
+    assert state.empty_ids == (62374,)
+    assert state.failed_ids == (62375,)
+
+
+def test_old_checkpoint_without_preview_data_loads_as_empty(tmp_path) -> None:
+    path = tmp_path / "checkpoints" / "2015.json"
+    path.parent.mkdir(parents=True)
+    path.write_text('{"year":2015,"completed_bonus_ids":[62373]}', encoding="utf-8")
+
+    loaded = CheckpointStore(tmp_path).load(2015)
+
+    assert loaded.completed_bonus_ids == (62373,)
+    assert loaded.preview_datasets == ()
+
+
+def test_preview_checkpoint_rejects_unknown_dataset_and_overlapping_states(tmp_path) -> None:
+    store = CheckpointStore(tmp_path)
+
+    with pytest.raises(StorageError, match="invalid_preview_checkpoint"):
+        store.save(CollectionCheckpoint(
+            year=2015,
+            preview_datasets=(PreviewDatasetCheckpoint(
+                dataset="unknown",
+                completed_ids=(62373,),
+            ),),
+        ))
+
+    with pytest.raises(StorageError, match="invalid_preview_checkpoint"):
+        store.save(CollectionCheckpoint(
+            year=2015,
+            preview_datasets=(PreviewDatasetCheckpoint(
+                dataset="match_feature",
+                completed_ids=(62373,),
+                failed_ids=(62373,),
+            ),),
+        ))

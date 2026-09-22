@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 
 from app.sporttery.models import HttpPayload
+from app.sporttery.preview import PreviewDataset
 
 
 BASE_URL = "https://webapi.sporttery.cn/gateway/uniform/football"
@@ -96,7 +97,23 @@ class SportteryClient:
             {"clientCode": 3001, "matchId": match_id},
         )
 
-    def _get(self, endpoint: str, params: dict[str, Any]) -> HttpPayload:
+    def fetch_preview(self, dataset: PreviewDataset, match_id: int) -> HttpPayload:
+        """按统一的中国竞彩比赛编号读取一个赛事前瞻数据集。"""
+        if match_id <= 0:
+            raise ValueError("invalid_match_id")
+        return self._get(
+            dataset.endpoint,
+            dataset.parameters(match_id),
+            allow_empty_value=True,
+        )
+
+    def _get(
+        self,
+        endpoint: str,
+        params: dict[str, Any],
+        *,
+        allow_empty_value: bool = False,
+    ) -> HttpPayload:
         last_code = "request_failed"
         for attempt in range(1, self.max_attempts + 1):
             try:
@@ -125,12 +142,16 @@ class SportteryClient:
             if response.status_code != 200:
                 raise SourceBusinessError(f"http_{response.status_code}")
 
-            return self._validated_payload(response)
+            return self._validated_payload(response, allow_empty_value=allow_empty_value)
 
         raise RetryableSourceError(last_code)
 
     @staticmethod
-    def _validated_payload(response: httpx.Response) -> HttpPayload:
+    def _validated_payload(
+        response: httpx.Response,
+        *,
+        allow_empty_value: bool = False,
+    ) -> HttpPayload:
         try:
             data = response.json()
         except ValueError as error:
@@ -140,7 +161,10 @@ class SportteryClient:
         if data.get("success") is not True or str(data.get("errorCode")) != "0":
             code = str(data.get("errorCode") or "unknown")
             raise SourceBusinessError(f"business_{code}")
-        if not isinstance(data.get("value"), dict):
+        value = data.get("value")
+        if not isinstance(value, dict) and not (
+            allow_empty_value and (value is None or isinstance(value, list))
+        ):
             raise SourceBusinessError("invalid_value_shape")
         return HttpPayload(
             data=data,

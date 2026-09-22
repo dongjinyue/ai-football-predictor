@@ -195,6 +195,18 @@ cd backend
 python -m app.sporttery.cli collect --start 2015-01-01 --end 2015-12-31 --delay-min 3 --delay-max 5 --resume
 ```
 
+如需同时保存赛事前瞻原始数据，增加 `--include-preview`：
+
+```bash
+python -m app.sporttery.cli collect --start 2015-01-01 --end 2015-12-31 --include-preview --delay-min 3 --delay-max 5 --resume
+```
+
+该开关会为每场比赛按固定顺序请求 7 组接口：历史特征、历史交锋、积分榜、近期结果、未来赛程、球员信息和伤停信息。原始响应保存到
+`data/raw/sporttery/previews/{年份}/{比赛ID}/`，数据库只记录来源、状态、校验值和本地路径；空响应会标记为 `empty`，不会伪造数据。
+前瞻接口的响应时间不等于赔率发布时间，训练前必须再次检查可用时间，避免把赛后信息泄漏到赛前样本。
+
+`--dry-run --include-preview` 只显示窗口数量和前瞻数据集数量，不发网络请求；`report --year 2015` 会同时显示前瞻成功、空响应和失败计数。
+
 - `--delay-min 3` / `--delay-max 5`：两次网络请求之间随机等待 3–5 秒，降低对官方服务的压力。
 - `--resume`：复用已校验的原始响应和检查点。首次运行也可带此参数；中断后必须带它继续，否则程序会提示 `existing_checkpoint_use_resume`，防止误开一个与旧进度冲突的任务。
 - 全年包含数千场比赛和逐场奖金请求，通常需要数小时。终端每完成一个列表页或一场奖金会输出一行 JSON 进度；不能根据短时间无输出判断任务卡死。

@@ -17,6 +17,7 @@ REQUIRED_TABLES = frozenset(
         "sporttery_bonus_outcomes",
         "sporttery_bonus_snapshots",
         "sporttery_matches",
+        "sporttery_preview_sources",
         "sporttery_requests",
         "sporttery_single_pools",
         "team_aliases",

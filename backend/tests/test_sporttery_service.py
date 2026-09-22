@@ -9,17 +9,24 @@ from copy import deepcopy
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-from app.sporttery.cli import parse_args
+from app.sporttery.cli import _collect_single_range, _coverage_payload, parse_args
 from app.sporttery.client import BlockedBySourceError, SourceBusinessError
 from app.sporttery.models import HttpPayload
-from app.sporttery.repository import SportteryRepository, SynchronizedSportteryRepository
+from app.sporttery.preview import PREVIEW_DATASETS
+from app.sporttery.repository import CoverageReport, SportteryRepository, SynchronizedSportteryRepository
 from app.sporttery.service import (
     CollectionReport,
     SportteryCollectionService,
     collect_with_blocked_retries,
     collect_years,
 )
-from app.sporttery.storage import CheckpointStore, RawResponseStore
+from app.sporttery.storage import (
+    CheckpointStore,
+    CollectionCheckpoint,
+    PreviewDatasetCheckpoint,
+    RawResponseStore,
+    get_preview_checkpoint,
+)
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -39,10 +46,19 @@ def _http(data: dict, key: str) -> HttpPayload:
 
 
 class FakeClient:
-    def __init__(self, *, fail_bonus: dict[int, Exception] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        fail_bonus: dict[int, Exception] | None = None,
+        fail_preview: dict[tuple[int, str], Exception] | None = None,
+        empty_preview: set[tuple[int, str]] | None = None,
+    ) -> None:
         self.match_calls: list[tuple[date, date, int, int]] = []
         self.bonus_calls: list[int] = []
         self.fail_bonus = fail_bonus or {}
+        self.fail_preview = fail_preview or {}
+        self.empty_preview = empty_preview or set()
+        self.preview_calls: list[tuple[int, str]] = []
         self.calls: list[str] = []
 
     def fetch_match_page(self, begin: date, end: date, page_no: int, page_size: int):
@@ -64,8 +80,24 @@ class FakeClient:
             history.update({"matchId": 62374, "leagueId": 37, "homeTeamId": 1003, "awayTeamId": 1004})
         return _http(payload, str(match_id))
 
+    def fetch_preview(self, dataset, match_id: int):
+        self.calls.append(f"preview:{match_id}:{dataset.code}")
+        self.preview_calls.append((match_id, dataset.code))
+        error = self.fail_preview.get((match_id, dataset.code))
+        if error is not None:
+            raise error
+        if (match_id, dataset.code) in self.empty_preview:
+            return _http({"emptyFlag": True, "value": None}, f"preview-{match_id}-{dataset.code}")
+        return _http({"emptyFlag": False, "value": {"matchId": match_id}}, f"preview-{match_id}-{dataset.code}")
 
-def _service(tmp_path: Path, client: FakeClient, waits: list[float] | None = None):
+
+def _service(
+    tmp_path: Path,
+    client: FakeClient,
+    waits: list[float] | None = None,
+    *,
+    include_preview: bool = False,
+):
     raw_root = tmp_path / "raw"
     return SportteryCollectionService(
         client=client,
@@ -76,6 +108,7 @@ def _service(tmp_path: Path, client: FakeClient, waits: list[float] | None = Non
         delay_max=5,
         sleep=(waits.append if waits is not None else lambda _: None),
         choose_delay=lambda low, high: 4.0,
+        include_preview=include_preview,
     )
 
 
@@ -212,6 +245,91 @@ def test_http_567_stops_and_preserves_checkpoint_for_resume(tmp_path: Path) -> N
     assert checkpoint.stopped_reason == "http_567"
 
 
+def test_preview_collection_is_opt_in_and_follows_catalog_order(tmp_path: Path) -> None:
+    default_client = FakeClient()
+    _service(tmp_path / "default", default_client).collect_range(
+        date(2015, 1, 1), date(2015, 1, 3)
+    )
+    assert default_client.preview_calls == []
+
+    client = FakeClient()
+    report = _service(tmp_path / "enabled", client, include_preview=True).collect_range(
+        date(2015, 1, 1), date(2015, 1, 3)
+    )
+
+    expected = [(match_id, dataset.code) for match_id in (62373, 62374) for dataset in PREVIEW_DATASETS]
+    assert client.preview_calls == expected
+    assert report.completed_preview == 14
+    assert report.empty_preview == 0
+    assert report.failed_preview == 0
+    assert report.preview_by_dataset == tuple((dataset.code, (2, 0, 0)) for dataset in PREVIEW_DATASETS)
+    assert client.calls[1:9] == [
+        "bonus:62373",
+        *[f"preview:62373:{dataset.code}" for dataset in PREVIEW_DATASETS],
+    ]
+
+
+def test_empty_and_failed_preview_do_not_stop_other_datasets_or_matches(tmp_path: Path) -> None:
+    client = FakeClient(
+        empty_preview={(62373, "match_player")},
+        fail_preview={(62373, "injury_suspension"): SourceBusinessError("business_missing")},
+    )
+
+    report = _service(tmp_path, client, include_preview=True).collect_range(
+        date(2015, 1, 1), date(2015, 1, 3)
+    )
+    checkpoint = CheckpointStore(tmp_path / "raw").load(2015)
+
+    assert report.status == "completed_with_errors"
+    assert report.completed_preview == 12
+    assert report.empty_preview == 1
+    assert report.failed_preview == 1
+    assert get_preview_checkpoint(checkpoint, "match_player").empty_ids == (62373,)
+    assert get_preview_checkpoint(checkpoint, "injury_suspension").failed_ids == (62373,)
+    assert (62374, "injury_suspension") in client.preview_calls
+
+
+def test_resume_replays_cached_preview_raw_without_network(tmp_path: Path) -> None:
+    raw = RawResponseStore(tmp_path / "raw")
+    _service(tmp_path, FakeClient()).collect_range(date(2015, 1, 1), date(2015, 1, 3))
+    for match_id in (62373, 62374):
+        for dataset in PREVIEW_DATASETS:
+            raw.write(
+                "previews",
+                2015,
+                f"{match_id}/{dataset.code}",
+                _http({"value": {"matchId": match_id}}, f"cached-{match_id}-{dataset.code}"),
+            )
+
+    client = FakeClient()
+    report = _service(tmp_path, client, include_preview=True).collect_range(
+        date(2015, 1, 1), date(2015, 1, 3), resume=True
+    )
+
+    assert client.preview_calls == []
+    assert report.completed_preview == 14
+    assert len(CheckpointStore(tmp_path / "raw").load(2015).preview_datasets) == 7
+
+
+def test_preview_http_567_stops_without_marking_later_datasets_failed(tmp_path: Path) -> None:
+    client = FakeClient(
+        fail_preview={(62373, "match_tables"): BlockedBySourceError("http_567")}
+    )
+
+    report = _service(tmp_path, client, include_preview=True).collect_range(
+        date(2015, 1, 1), date(2015, 1, 3)
+    )
+    checkpoint = CheckpointStore(tmp_path / "raw").load(2015)
+
+    assert report.status == "blocked"
+    assert report.stopped_reason == "http_567"
+    assert report.completed_preview == 2
+    assert client.preview_calls == [(62373, "match_feature"), (62373, "result_history"), (62373, "match_tables")]
+    assert get_preview_checkpoint(checkpoint, "match_feature").completed_ids == (62373,)
+    assert get_preview_checkpoint(checkpoint, "result_history").completed_ids == (62373,)
+    assert get_preview_checkpoint(checkpoint, "match_tables").completed_ids == ()
+
+
 def test_unknown_list_shape_stops_with_parse_code_and_keeps_raw_page(tmp_path: Path) -> None:
     class InvalidScoreClient(FakeClient):
         def fetch_match_page(self, begin: date, end: date, page_no: int, page_size: int):
@@ -240,6 +358,55 @@ def test_cli_parses_collection_controls_and_dry_run() -> None:
     assert (args.delay_min, args.delay_max) == (3.0, 5.0)
     assert args.resume is True
     assert args.dry_run is True
+    assert args.include_preview is False
+
+    preview_args = parse_args([
+        "collect", "--start", "2015-01-01", "--end", "2015-01-03",
+        "--include-preview",
+    ])
+    assert preview_args.include_preview is True
+
+
+def test_cli_preview_dry_run_reports_extra_dataset_count(capsys) -> None:
+    args = parse_args([
+        "collect", "--start", "2015-01-01", "--end", "2015-01-03",
+        "--include-preview", "--dry-run",
+    ])
+
+    assert _collect_single_range(args, object()) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["network_requests"] == 0
+    assert output["preview_datasets"] == 7
+
+
+def test_coverage_payload_merges_checkpoint_failures_with_database_counts() -> None:
+    report = CoverageReport(
+        year=2015,
+        matches=10,
+        matches_with_bonus=8,
+        snapshots=20,
+        outcomes=60,
+        request_records=30,
+        snapshots_by_market=(),
+        completed_preview=2,
+        empty_preview=1,
+        preview_by_dataset=(("match_feature", (2, 1)),),
+    )
+    checkpoint = CollectionCheckpoint(
+        year=2015,
+        preview_datasets=(
+            PreviewDatasetCheckpoint("match_feature", failed_ids=(123,)),
+        ),
+    )
+
+    payload = _coverage_payload(report, checkpoint)
+
+    assert payload["failed_preview"] == 1
+    assert payload["preview_by_dataset"]["match_feature"] == {
+        "completed": 2,
+        "empty": 1,
+        "failed": 1,
+    }
 
 
 def test_cli_parses_parallel_year_collection_controls() -> None:
