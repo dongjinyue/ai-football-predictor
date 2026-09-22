@@ -45,13 +45,14 @@ def test_migration_creates_sporttery_tables(tmp_path: Path) -> None:
         tables = {row[0] for row in connection.execute("SHOW TABLES").fetchall()}
         version = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
 
-    assert version == 8
+    assert version == 9
     assert {
         "sporttery_matches",
         "sporttery_bonus_snapshots",
         "sporttery_bonus_outcomes",
         "sporttery_single_pools",
         "sporttery_requests",
+        "sporttery_preview_sources",
     } <= tables
 
 
@@ -90,6 +91,48 @@ def test_bonus_import_rolls_back_when_match_is_unknown(tmp_path: Path) -> None:
     with duckdb.connect(str(database), read_only=True) as connection:
         assert connection.execute("SELECT COUNT(*) FROM sporttery_bonus_snapshots").fetchone()[0] == 0
         assert connection.execute("SELECT COUNT(*) FROM sporttery_requests").fetchone()[0] == 0
+
+
+def test_preview_source_import_is_idempotent_and_portable(tmp_path: Path) -> None:
+    database = tmp_path / "sporttery.duckdb"
+    repository = SportteryRepository(database)
+    repository.import_match_page(_parsed("sporttery_match_page.json"), _stored("page-1"))
+    raw = StoredResponse(
+        path=Path("data/raw/sporttery/previews/2015/62373/match_feature.json"),
+        sha256="sha-preview",
+        fetched_at=datetime(2026, 9, 19, tzinfo=timezone.utc),
+        request_url="https://example.test/getMatchFeatureV1.qry?sportteryMatchId=62373",
+        status_code=200,
+        data={"success": True, "emptyFlag": False, "value": {"home": {}}},
+        from_cache=False,
+    )
+
+    repository.import_preview_source(62373, "match_feature", "completed", raw)
+    repository.import_preview_source(62373, "match_feature", "completed", raw)
+    report = repository.coverage_report(2015)
+
+    assert report.completed_preview == 1
+    assert report.empty_preview == 0
+    assert dict(report.preview_by_dataset) == {"match_feature": (1, 0)}
+    with duckdb.connect(str(database), read_only=True) as connection:
+        assert connection.execute(
+            "SELECT local_path FROM sporttery_preview_sources"
+        ).fetchone()[0] == "data/raw/sporttery/previews/2015/62373/match_feature.json"
+        assert connection.execute(
+            "SELECT COUNT(*) FROM sporttery_requests WHERE request_kind = 'preview:match_feature'"
+        ).fetchone()[0] == 1
+
+
+def test_preview_source_import_rejects_unknown_match_and_status(tmp_path: Path) -> None:
+    repository = SportteryRepository(tmp_path / "sporttery.duckdb")
+    raw = _stored("preview")
+
+    with pytest.raises(ValueError, match="unknown_match"):
+        repository.import_preview_source(62373, "match_feature", "completed", raw)
+
+    repository.import_match_page(_parsed("sporttery_match_page.json"), _stored("page-1"))
+    with pytest.raises(ValueError, match="invalid_preview_status"):
+        repository.import_preview_source(62373, "match_feature", "failed", raw)
 
 
 def test_sporttery_facts_are_visible_in_history_browser_without_fake_exact_time(
