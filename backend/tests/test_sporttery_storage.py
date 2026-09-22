@@ -105,6 +105,26 @@ def test_atomic_write_retries_a_transient_windows_replace_denial(
     assert list(tmp_path.rglob("*.part")) == []
 
 
+def test_atomic_write_survives_a_longer_windows_lock(tmp_path, monkeypatch) -> None:
+    """Windows 扫描器占用数秒时，检查点写入也应继续重试而非丢失任务。"""
+    original_replace = Path.replace
+    attempts = 0
+
+    def flaky_replace(path: Path, target: Path):
+        nonlocal attempts
+        attempts += 1
+        if attempts <= 5:
+            raise PermissionError("temporarily locked")
+        return original_replace(path, target)
+
+    monkeypatch.setattr(Path, "replace", flaky_replace)
+    monkeypatch.setattr("app.sporttery.storage.time.sleep", lambda _: None)
+
+    CheckpointStore(tmp_path).save(CollectionCheckpoint(year=2015))
+
+    assert attempts == 6
+
+
 def test_checkpoint_corruption_is_not_silently_reset(tmp_path) -> None:
     path = tmp_path / "checkpoints" / "2015.json"
     path.parent.mkdir(parents=True)

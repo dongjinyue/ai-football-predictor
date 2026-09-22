@@ -271,15 +271,18 @@ def _atomic_json_write(path: Path, document: dict[str, Any]) -> None:
             json.dumps(document, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
             encoding="utf-8",
         )
-        for attempt in range(5):
+        # Windows 扫描器、索引器或编辑器可能短暂持有目标文件；延长重试窗口，
+        # 同时限制单次等待，避免真正异常时长时间假死。
+        retries = 8
+        for attempt in range(retries):
             try:
                 part.replace(path)
                 break
             except PermissionError:
                 # Windows 索引器或杀毒软件可能短暂占用目标文件，退避后重试原子替换。
-                if attempt == 4:
+                if attempt == retries - 1:
                     raise
-                time.sleep(0.05 * (2**attempt))
+                time.sleep(min(0.1 * (2**attempt), 1.0))
     finally:
         if part.exists():
             part.unlink()
