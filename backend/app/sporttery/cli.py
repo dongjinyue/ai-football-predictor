@@ -12,7 +12,12 @@ from typing import Sequence
 
 from app.config import PROJECT_ROOT, load_settings
 from app.sporttery.client import SportteryClient
-from app.sporttery.repository import SportteryRepository, SynchronizedSportteryRepository
+from app.sporttery.preview import PREVIEW_DATASETS
+from app.sporttery.repository import (
+    CoverageReport,
+    SportteryRepository,
+    SynchronizedSportteryRepository,
+)
 from app.sporttery.service import (
     CollectionReport,
     SportteryCollectionService,
@@ -20,7 +25,7 @@ from app.sporttery.service import (
     collect_with_blocked_retries,
     collect_years,
 )
-from app.sporttery.storage import CheckpointStore, RawResponseStore
+from app.sporttery.storage import CheckpointStore, CollectionCheckpoint, RawResponseStore
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -69,6 +74,11 @@ def _add_collection_controls(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--delay-max", type=float, default=5.0)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--include-preview",
+        action="store_true",
+        help="同时采集 7 组赛事前瞻原始数据",
+    )
 
 
 def _validate_collection_controls(parser: argparse.ArgumentParser, args) -> None:
@@ -81,7 +91,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     settings = load_settings()
     repository = SportteryRepository(settings.database_path)
     if args.command == "report":
-        print(json.dumps(asdict(repository.coverage_report(args.year)), ensure_ascii=False, indent=2))
+        raw_root = PROJECT_ROOT / "data" / "raw" / "sporttery"
+        checkpoint = CheckpointStore(raw_root).load(args.year)
+        print(json.dumps(
+            _coverage_payload(repository.coverage_report(args.year), checkpoint),
+            ensure_ascii=False,
+            indent=2,
+        ))
         return 0
     if args.command == "collect-years":
         return _collect_multiple_years(args, repository)
@@ -96,6 +112,7 @@ def _collect_single_range(args, repository: SportteryRepository) -> int:
             "end": args.end.isoformat(),
             "windows": len(windows),
             "network_requests": 0,
+            "preview_datasets": len(PREVIEW_DATASETS) if args.include_preview else 0,
         }, ensure_ascii=False, indent=2))
         return 0
 
@@ -103,6 +120,7 @@ def _collect_single_range(args, repository: SportteryRepository) -> int:
     service = _build_service(
         client, repository, args.delay_min, args.delay_max,
         lambda event: print(json.dumps(event, ensure_ascii=False), flush=True),
+        include_preview=args.include_preview,
     )
     try:
         result = service.collect_range(args.start, args.end, resume=args.resume)
@@ -127,6 +145,7 @@ def _collect_multiple_years(
             "years": len(years),
             "through": today.isoformat(),
             "network_requests": 0,
+            "preview_datasets": len(PREVIEW_DATASETS) if args.include_preview else 0,
         }, ensure_ascii=False, indent=2))
         return 0
 
@@ -146,6 +165,7 @@ def _collect_multiple_years(
             args.delay_min,
             args.delay_max,
             lambda event: progress(year, event),
+            include_preview=args.include_preview,
         )
         try:
             def wait(seconds: float) -> None:
@@ -169,7 +189,7 @@ def _collect_multiple_years(
     return _result_exit_code(results)
 
 
-def _build_service(client, repository, delay_min, delay_max, progress):
+def _build_service(client, repository, delay_min, delay_max, progress, *, include_preview=False):
     raw_root = PROJECT_ROOT / "data" / "raw" / "sporttery"
     return SportteryCollectionService(
         client=client,
@@ -179,7 +199,31 @@ def _build_service(client, repository, delay_min, delay_max, progress):
         delay_min=delay_min,
         delay_max=delay_max,
         progress=progress,
+        include_preview=include_preview,
     )
+
+
+def _coverage_payload(
+    report: CoverageReport, checkpoint: CollectionCheckpoint
+) -> dict[str, object]:
+    """合并数据库事实与检查点失败状态，避免报告漏掉尚未入库的失败项。"""
+    payload = asdict(report)
+    states = {state.dataset: state for state in checkpoint.preview_datasets}
+    database_by_dataset = dict(report.preview_by_dataset)
+    preview_by_dataset: dict[str, dict[str, int]] = {}
+    for dataset in PREVIEW_DATASETS:
+        completed, empty = database_by_dataset.get(dataset.code, (0, 0))
+        state = states.get(dataset.code)
+        preview_by_dataset[dataset.code] = {
+            "completed": int(completed),
+            "empty": int(empty),
+            "failed": len(state.failed_ids) if state is not None else 0,
+        }
+    payload["completed_preview"] = report.completed_preview
+    payload["empty_preview"] = report.empty_preview
+    payload["failed_preview"] = sum(item["failed"] for item in preview_by_dataset.values())
+    payload["preview_by_dataset"] = preview_by_dataset
+    return payload
 
 
 def _result_exit_code(results: Sequence[CollectionReport]) -> int:

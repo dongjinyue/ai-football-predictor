@@ -9,18 +9,24 @@ from copy import deepcopy
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-from app.sporttery.cli import parse_args
+from app.sporttery.cli import _collect_single_range, _coverage_payload, parse_args
 from app.sporttery.client import BlockedBySourceError, SourceBusinessError
 from app.sporttery.models import HttpPayload
 from app.sporttery.preview import PREVIEW_DATASETS
-from app.sporttery.repository import SportteryRepository, SynchronizedSportteryRepository
+from app.sporttery.repository import CoverageReport, SportteryRepository, SynchronizedSportteryRepository
 from app.sporttery.service import (
     CollectionReport,
     SportteryCollectionService,
     collect_with_blocked_retries,
     collect_years,
 )
-from app.sporttery.storage import CheckpointStore, RawResponseStore, get_preview_checkpoint
+from app.sporttery.storage import (
+    CheckpointStore,
+    CollectionCheckpoint,
+    PreviewDatasetCheckpoint,
+    RawResponseStore,
+    get_preview_checkpoint,
+)
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -352,6 +358,55 @@ def test_cli_parses_collection_controls_and_dry_run() -> None:
     assert (args.delay_min, args.delay_max) == (3.0, 5.0)
     assert args.resume is True
     assert args.dry_run is True
+    assert args.include_preview is False
+
+    preview_args = parse_args([
+        "collect", "--start", "2015-01-01", "--end", "2015-01-03",
+        "--include-preview",
+    ])
+    assert preview_args.include_preview is True
+
+
+def test_cli_preview_dry_run_reports_extra_dataset_count(capsys) -> None:
+    args = parse_args([
+        "collect", "--start", "2015-01-01", "--end", "2015-01-03",
+        "--include-preview", "--dry-run",
+    ])
+
+    assert _collect_single_range(args, object()) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["network_requests"] == 0
+    assert output["preview_datasets"] == 7
+
+
+def test_coverage_payload_merges_checkpoint_failures_with_database_counts() -> None:
+    report = CoverageReport(
+        year=2015,
+        matches=10,
+        matches_with_bonus=8,
+        snapshots=20,
+        outcomes=60,
+        request_records=30,
+        snapshots_by_market=(),
+        completed_preview=2,
+        empty_preview=1,
+        preview_by_dataset=(("match_feature", (2, 1)),),
+    )
+    checkpoint = CollectionCheckpoint(
+        year=2015,
+        preview_datasets=(
+            PreviewDatasetCheckpoint("match_feature", failed_ids=(123,)),
+        ),
+    )
+
+    payload = _coverage_payload(report, checkpoint)
+
+    assert payload["failed_preview"] == 1
+    assert payload["preview_by_dataset"]["match_feature"] == {
+        "completed": 2,
+        "empty": 1,
+        "failed": 1,
+    }
 
 
 def test_cli_parses_parallel_year_collection_controls() -> None:
