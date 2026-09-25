@@ -8,6 +8,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import date, timedelta
+from threading import Lock
 
 from app.sporttery.client import (
     BlockedBySourceError,
@@ -51,6 +52,40 @@ class CollectionReport:
     preview_by_dataset: tuple[tuple[str, tuple[int, int, int]], ...] = ()
 
 
+class RequestStartPacer:
+    """在所有采集线程之间共享的请求起始间隔控制器。"""
+
+    def __init__(
+        self,
+        delay_min: float,
+        delay_max: float,
+        *,
+        sleep: Callable[[float], None] = time.sleep,
+        choose_delay: Callable[[float, float], float] = random.uniform,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if delay_min < 0 or delay_max < delay_min:
+            raise ValueError("invalid_delay_range")
+        self.delay_min = delay_min
+        self.delay_max = delay_max
+        self.sleep = sleep
+        self.choose_delay = choose_delay
+        self.monotonic = monotonic
+        self._next_start = 0.0
+        self._lock = Lock()
+
+    def wait(self) -> None:
+        """只等待到下一个请求起始时刻，不把本地解析和入库耗时叠加进去。"""
+        with self._lock:
+            now = self.monotonic()
+            wait_seconds = max(0.0, self._next_start - now)
+            if wait_seconds:
+                self.sleep(wait_seconds)
+            self._next_start = self.monotonic() + self.choose_delay(
+                self.delay_min, self.delay_max
+            )
+
+
 def collect_years(
     years,
     *,
@@ -87,7 +122,7 @@ def collect_with_blocked_retries(
 
 
 class SportteryCollectionService:
-    """单线程、有限速、每项完成即落检查点的采集协调器。"""
+    """负责单场数据采集、请求节流、批量入库和断点恢复的协调器。"""
 
     def __init__(
         self,
@@ -102,6 +137,7 @@ class SportteryCollectionService:
         choose_delay: Callable[[float, float], float] = random.uniform,
         progress: Callable[[dict[str, object]], None] | None = None,
         include_preview: bool = False,
+        request_pacer: RequestStartPacer | None = None,
     ) -> None:
         if delay_min < 0 or delay_max < delay_min:
             raise ValueError("invalid_delay_range")
@@ -109,13 +145,11 @@ class SportteryCollectionService:
         self.raw_store = raw_store
         self.checkpoint_store = checkpoint_store
         self.repository = repository
-        self.delay_min = delay_min
-        self.delay_max = delay_max
-        self.sleep = sleep
-        self.choose_delay = choose_delay
+        self.pacer = request_pacer or RequestStartPacer(
+            delay_min, delay_max, sleep=sleep, choose_delay=choose_delay
+        )
         self.progress = progress or (lambda event: None)
         self.include_preview = include_preview
-        self._network_requests = 0
 
     def collect_range(
         self,
@@ -124,6 +158,7 @@ class SportteryCollectionService:
         window_days: int = 7,
         *,
         resume: bool = False,
+        replay_imports: bool = False,
     ) -> CollectionReport:
         if end_date < start_date:
             raise ValueError("end_before_start")
@@ -161,8 +196,13 @@ class SportteryCollectionService:
                             )
                     page = parse_match_page(stored.data)
                     pages = page.pages
-                    # 即使检查点已完成也重放幂等写入，便于数据库迁移后从原始证据补齐新映射。
-                    self.repository.import_match_page(page, stored)
+                    # 重放模式用于数据库映射迁移；平时跳过已提交的列表页内容。
+                    if replay_imports:
+                        self.repository.import_match_page(
+                            page, stored, replay_imports=True
+                        )
+                    else:
+                        self.repository.import_match_page(page, stored)
                     if page_key not in checkpoint.completed_pages:
                         checkpoint = replace(
                             checkpoint,
@@ -170,18 +210,34 @@ class SportteryCollectionService:
                             match_ids=(*checkpoint.match_ids, *(item.match_id for item in page.matches)),
                         )
                         self.checkpoint_store.save(checkpoint)
+                    completed_candidates = set()
+                    if resume and not replay_imports:
+                        candidates = _checkpoint_completed_detail_ids(
+                            checkpoint,
+                            [match.match_id for match in page.matches],
+                            include_preview=self.include_preview,
+                        )
+                        verify_imports = getattr(
+                            self.repository, "fully_imported_match_ids", None
+                        )
+                        if callable(verify_imports) and candidates:
+                            completed_candidates = verify_imports(
+                                list(candidates), include_preview=self.include_preview
+                            )
                     for match in page.matches:
                         if match.match_id in seen:
                             duplicate_rows += 1
                         seen.add(match.match_id)
+                        if match.match_id in completed_candidates:
+                            processed_bonus_ids.add(match.match_id)
+                            continue
                         if match.match_id not in processed_bonus_ids:
-                            checkpoint = self._collect_fixed_bonus(
-                                checkpoint, match.match_id, start_date.year
+                            checkpoint = self._collect_match_details(
+                                checkpoint,
+                                match.match_id,
+                                start_date.year,
+                                replay_imports=replay_imports,
                             )
-                            if self.include_preview:
-                                checkpoint = self._collect_previews(
-                                    checkpoint, match.match_id, start_date.year
-                                )
                             processed_bonus_ids.add(match.match_id)
                     self.progress({
                         "event": "list_page",
@@ -208,13 +264,12 @@ class SportteryCollectionService:
         for match_id in checkpoint.match_ids:
             if match_id not in processed_bonus_ids:
                 try:
-                    checkpoint = self._collect_fixed_bonus(
-                        checkpoint, match_id, start_date.year
+                    checkpoint = self._collect_match_details(
+                        checkpoint,
+                        match_id,
+                        start_date.year,
+                        replay_imports=replay_imports,
                     )
-                    if self.include_preview:
-                        checkpoint = self._collect_previews(
-                            checkpoint, match_id, start_date.year
-                        )
                 except BlockedBySourceError as error:
                     return self._stopped_report(
                         checkpoint, start_date, end_date, duplicate_rows, "blocked", error.code
@@ -227,108 +282,121 @@ class SportteryCollectionService:
         )
         return _report(checkpoint, start_date, end_date, duplicate_rows, status, None)
 
-    def _collect_fixed_bonus(
-        self, checkpoint: CollectionCheckpoint, match_id: int, year: int
+    def _collect_match_details(
+        self,
+        checkpoint: CollectionCheckpoint,
+        match_id: int,
+        year: int,
+        *,
+        replay_imports: bool,
     ) -> CollectionCheckpoint:
-        """抓取并立即写入单场赔率，使长时间列表采集也能逐步产出可见数据。"""
-        completed = set(checkpoint.completed_bonus_ids)
-        failed = set(checkpoint.failed_bonus_ids)
+        """采集单场数据，统一入库并在比赛边界保存一次检查点。"""
+        fixed_bonus = None
+        previews = []
+        events: list[dict[str, object]] = []
+        blocked_error: BlockedBySourceError | None = None
+
+        completed_bonus = set(checkpoint.completed_bonus_ids)
+        failed_bonus = set(checkpoint.failed_bonus_ids)
         try:
             stored = self.raw_store.load("fixed_bonus", year, str(match_id))
             if stored is None:
                 self._pace()
                 payload = self.client.fetch_fixed_bonus(match_id)
                 stored = self.raw_store.write("fixed_bonus", year, str(match_id), payload)
-            record = parse_fixed_bonus(stored.data)
-            self.repository.import_fixed_bonus(record, stored)
-            completed.add(match_id)
-            failed.discard(match_id)
-            status_event = {"event": "fixed_bonus", "match_id": match_id, "status": "completed"}
-        except BlockedBySourceError:
-            raise
+            fixed_bonus = (parse_fixed_bonus(stored.data), stored)
+            completed_bonus.add(match_id)
+            failed_bonus.discard(match_id)
+            events.append({"event": "fixed_bonus", "match_id": match_id, "status": "completed"})
+        except BlockedBySourceError as error:
+            blocked_error = error
         except (SourceBusinessError, SportterySourceError, SportteryParseError) as error:
-            completed.discard(match_id)
-            failed.add(match_id)
+            completed_bonus.discard(match_id)
+            failed_bonus.add(match_id)
             code = error.code if isinstance(error, SportterySourceError) else f"parse_{error}"
-            status_event = {
+            events.append({
                 "event": "fixed_bonus", "match_id": match_id,
                 "status": "failed", "code": code,
-            }
+            })
         checkpoint = replace(
             checkpoint,
-            completed_bonus_ids=tuple(sorted(completed)),
-            failed_bonus_ids=tuple(sorted(failed)),
+            completed_bonus_ids=tuple(completed_bonus),
+            failed_bonus_ids=tuple(failed_bonus),
         )
-        self.checkpoint_store.save(checkpoint)
-        self.progress(status_event)
-        return checkpoint
 
-    def _collect_previews(
-        self, checkpoint: CollectionCheckpoint, match_id: int, year: int
-    ) -> CollectionCheckpoint:
-        """按目录顺序采集一场比赛的 7 组前瞻原始响应。
-
-        每组数据独立落盘和更新检查点。普通业务错误只记录为 failed 并继续，
-        只有 HTTP 567 这类阻断错误才交给外层停止逻辑处理。
-        """
-        for dataset in PREVIEW_DATASETS:
-            state = get_preview_checkpoint(checkpoint, dataset.code)
-            completed = set(state.completed_ids)
-            empty = set(state.empty_ids)
-            failed = set(state.failed_ids)
-            try:
-                stored = self.raw_store.load(
-                    "previews", year, f"{match_id}/{dataset.code}"
-                )
-                if stored is None:
-                    self._pace()
-                    payload = self.client.fetch_preview(dataset, match_id)
-                    stored = self.raw_store.write(
-                        "previews", year, f"{match_id}/{dataset.code}", payload
+        if self.include_preview and blocked_error is None:
+            for dataset in PREVIEW_DATASETS:
+                state = get_preview_checkpoint(checkpoint, dataset.code)
+                completed = set(state.completed_ids)
+                empty = set(state.empty_ids)
+                failed = set(state.failed_ids)
+                try:
+                    stored = self.raw_store.load(
+                        "previews", year, f"{match_id}/{dataset.code}"
                     )
-                status = classify_preview_payload(stored.data)
-                self.repository.import_preview_source(match_id, dataset.code, status, stored)
-                completed.discard(match_id)
-                empty.discard(match_id)
-                failed.discard(match_id)
-                (completed if status == "completed" else empty).add(match_id)
-                event: dict[str, object] = {
-                    "event": "preview",
-                    "match_id": match_id,
-                    "dataset": dataset.code,
-                    "status": status,
-                }
-            except BlockedBySourceError:
-                raise
-            except (SourceBusinessError, SportterySourceError, SportteryParseError) as error:
-                completed.discard(match_id)
-                empty.discard(match_id)
-                failed.add(match_id)
-                code = error.code if isinstance(error, SportterySourceError) else f"parse_{error}"
-                event = {
-                    "event": "preview",
-                    "match_id": match_id,
-                    "dataset": dataset.code,
-                    "status": "failed",
-                    "code": code,
-                }
-            checkpoint = replace_preview_checkpoint(
-                checkpoint,
-                PreviewDatasetCheckpoint(
-                    dataset=dataset.code,
-                    completed_ids=tuple(completed),
-                    empty_ids=tuple(empty),
-                    failed_ids=tuple(failed),
-                ),
-            )
-            self.checkpoint_store.save(checkpoint)
+                    if stored is None:
+                        self._pace()
+                        payload = self.client.fetch_preview(dataset, match_id)
+                        stored = self.raw_store.write(
+                            "previews", year, f"{match_id}/{dataset.code}", payload
+                        )
+                    status = classify_preview_payload(stored.data)
+                    previews.append((match_id, dataset.code, status, stored))
+                    completed.discard(match_id)
+                    empty.discard(match_id)
+                    failed.discard(match_id)
+                    (completed if status == "completed" else empty).add(match_id)
+                    events.append({
+                        "event": "preview",
+                        "match_id": match_id,
+                        "dataset": dataset.code,
+                        "status": status,
+                    })
+                except BlockedBySourceError as error:
+                    blocked_error = error
+                    break
+                except (SourceBusinessError, SportterySourceError, SportteryParseError) as error:
+                    completed.discard(match_id)
+                    empty.discard(match_id)
+                    failed.add(match_id)
+                    code = error.code if isinstance(error, SportterySourceError) else f"parse_{error}"
+                    events.append({
+                        "event": "preview",
+                        "match_id": match_id,
+                        "dataset": dataset.code,
+                        "status": "failed",
+                        "code": code,
+                    })
+                checkpoint = replace_preview_checkpoint(
+                    checkpoint,
+                    PreviewDatasetCheckpoint(
+                        dataset=dataset.code,
+                        completed_ids=tuple(completed),
+                        empty_ids=tuple(empty),
+                        failed_ids=tuple(failed),
+                    ),
+                )
+
+        batch_import = getattr(self.repository, "import_match_details", None)
+        if callable(batch_import):
+            batch_import(fixed_bonus, previews, replay_imports=replay_imports)
+        else:
+            # 兼容旧的仓储替身；正式仓储使用单事务批量写入。
+            if fixed_bonus is not None:
+                batch_import = getattr(self.repository, "import_fixed_bonus")
+                batch_import(*fixed_bonus)
+            for preview in previews:
+                self.repository.import_preview_source(*preview)
+
+        self.checkpoint_store.save(checkpoint)
+        for event in events:
             self.progress(event)
+        if blocked_error is not None:
+            raise blocked_error
         return checkpoint
 
     def _pace(self) -> None:
-        if self._network_requests:
-            self.sleep(self.choose_delay(self.delay_min, self.delay_max))
-        self._network_requests += 1
+        self.pacer.wait()
 
     def _stopped_report(
         self,
@@ -366,6 +434,24 @@ def _has_progress(checkpoint: CollectionCheckpoint) -> bool:
             for state in checkpoint.preview_datasets
         )
     )
+
+
+def _checkpoint_completed_detail_ids(
+    checkpoint: CollectionCheckpoint,
+    match_ids: list[int],
+    *,
+    include_preview: bool,
+) -> set[int]:
+    completed = set(match_ids) & set(checkpoint.completed_bonus_ids)
+    if not include_preview:
+        return completed
+    states = {state.dataset: state for state in checkpoint.preview_datasets}
+    for dataset in PREVIEW_DATASETS:
+        state = states.get(dataset.code)
+        if state is None:
+            return set()
+        completed &= set(state.completed_ids) | set(state.empty_ids)
+    return completed
 
 
 def _report(

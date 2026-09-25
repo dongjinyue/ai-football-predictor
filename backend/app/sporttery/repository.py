@@ -19,7 +19,7 @@ from app.sporttery.models import (
     MatchPageRecord,
     SportteryMatch,
 )
-from app.sporttery.preview import is_preview_dataset
+from app.sporttery.preview import PREVIEW_DATASETS, is_preview_dataset
 from app.sporttery.storage import StoredResponse
 from app.storage import initialize_database
 
@@ -50,9 +50,26 @@ class SynchronizedSportteryRepository:
         self._repository = repository
         self._lock = RLock()
 
-    def import_match_page(self, page: MatchPageRecord, raw: StoredResponse) -> None:
+    def import_match_page(
+        self,
+        page: MatchPageRecord,
+        raw: StoredResponse,
+        *,
+        replay_imports: bool = False,
+    ) -> None:
         with self._lock:
-            self._repository.import_match_page(page, raw)
+            if replay_imports:
+                self._repository.import_match_page(page, raw, replay_imports=True)
+            else:
+                self._repository.import_match_page(page, raw)
+
+    def fully_imported_match_ids(
+        self, match_ids: list[int], *, include_preview: bool
+    ) -> set[int]:
+        with self._lock:
+            return self._repository.fully_imported_match_ids(
+                match_ids, include_preview=include_preview
+            )
 
     def import_fixed_bonus(self, record: FixedBonusRecord, raw: StoredResponse) -> None:
         with self._lock:
@@ -68,6 +85,18 @@ class SynchronizedSportteryRepository:
         with self._lock:
             self._repository.import_preview_source(match_id, dataset, status, raw)
 
+    def import_match_details(
+        self,
+        fixed_bonus: tuple[FixedBonusRecord, StoredResponse] | None,
+        previews: list[tuple[int, str, str, StoredResponse]],
+        *,
+        replay_imports: bool = False,
+    ) -> None:
+        with self._lock:
+            self._repository.import_match_details(
+                fixed_bonus, previews, replay_imports=replay_imports
+            )
+
     def coverage_report(self, year: int) -> CoverageReport:
         with self._lock:
             return self._repository.coverage_report(year)
@@ -80,10 +109,27 @@ class SportteryRepository:
         self.database_path = database_path
         initialize_database(database_path)
 
-    def import_match_page(self, page: MatchPageRecord, raw: StoredResponse) -> None:
+    def import_match_page(
+        self,
+        page: MatchPageRecord,
+        raw: StoredResponse,
+        *,
+        replay_imports: bool = False,
+    ) -> None:
         with duckdb.connect(str(self.database_path)) as connection:
             connection.execute("BEGIN TRANSACTION")
             try:
+                request_exists = connection.execute(
+                    """
+                    SELECT 1 FROM sporttery_requests
+                    WHERE request_kind = 'match_list' AND request_url = ? AND sha256 = ?
+                    LIMIT 1
+                    """,
+                    [raw.request_url, raw.sha256],
+                ).fetchone()
+                if request_exists is not None and not replay_imports:
+                    connection.execute("COMMIT")
+                    return
                 match_ids = [match.match_id for match in page.matches]
                 core_ids = {
                     match.match_id: _stable_id("core-match", str(match.match_id))
@@ -157,6 +203,45 @@ class SportteryRepository:
             else:
                 connection.execute("COMMIT")
 
+    def fully_imported_match_ids(
+        self, match_ids: list[int], *, include_preview: bool
+    ) -> set[int]:
+        """按页批量确认已完整入库的比赛，避免续跑时重复读写原始响应。"""
+        if not match_ids:
+            return set()
+        with duckdb.connect(str(self.database_path), read_only=True) as connection:
+            fixed_patterns = [f"%&matchId={match_id}" for match_id in match_ids]
+            fixed_where = " OR ".join("request_url LIKE ?" for _ in fixed_patterns)
+            fixed_urls = connection.execute(
+                """
+                SELECT request_url FROM sporttery_requests
+                WHERE request_kind = 'fixed_bonus' AND (""" + fixed_where + ")",
+                fixed_patterns,
+            ).fetchall()
+            fixed_ids = {
+                match_id
+                for match_id in match_ids
+                if any(str(row[0]).endswith(f"&matchId={match_id}") for row in fixed_urls)
+            }
+            if not include_preview:
+                return fixed_ids
+
+            placeholders = ", ".join("?" for _ in match_ids)
+            preview_counts = connection.execute(
+                f"""
+                SELECT match_id, COUNT(DISTINCT dataset)
+                FROM sporttery_preview_sources
+                WHERE match_id IN ({placeholders})
+                GROUP BY match_id
+                """,
+                match_ids,
+            ).fetchall()
+        preview_ids = {
+            int(row[0]) for row in preview_counts
+            if int(row[1]) >= len(PREVIEW_DATASETS)
+        }
+        return fixed_ids & preview_ids
+
     def import_preview_source(
         self,
         match_id: int,
@@ -164,115 +249,172 @@ class SportteryRepository:
         status: str,
         raw: StoredResponse,
     ) -> None:
-        """登记一场比赛的一个前瞻原始响应，重复导入保持幂等。"""
+        self.import_match_details(None, [(match_id, dataset, status, raw)])
+
+    def import_match_details(
+        self,
+        fixed_bonus: tuple[FixedBonusRecord, StoredResponse] | None,
+        previews: list[tuple[int, str, str, StoredResponse]],
+        *,
+        replay_imports: bool = False,
+    ) -> None:
+        """将一场比赛已采集到的赔率和前瞻响应合并到一个事务中。"""
+        if fixed_bonus is None and not previews:
+            return
+        with duckdb.connect(str(self.database_path)) as connection:
+            connection.execute("BEGIN TRANSACTION")
+            try:
+                request_rows: list[tuple[str, StoredResponse]] = []
+                if fixed_bonus is not None:
+                    request_rows.append(("fixed_bonus", fixed_bonus[1]))
+                request_rows.extend(
+                    (f"preview:{dataset}", raw)
+                    for _match_id, dataset, _status, raw in previews
+                )
+                imported: set[tuple[str, str, str]] = set()
+                if request_rows and not replay_imports:
+                    conditions = " OR ".join(
+                        "(request_kind = ? AND request_url = ? AND sha256 = ?)"
+                        for _kind, _raw in request_rows
+                    )
+                    parameters = [
+                        value
+                        for kind, raw in request_rows
+                        for value in (kind, raw.request_url, raw.sha256)
+                    ]
+                    imported = {
+                        (str(row[0]), str(row[1]), str(row[2]))
+                        for row in connection.execute(
+                            """
+                            SELECT request_kind, request_url, sha256
+                            FROM sporttery_requests
+                            WHERE """ + conditions,
+                            parameters,
+                        ).fetchall()
+                    }
+                if fixed_bonus is not None and (
+                    replay_imports
+                    or ("fixed_bonus", fixed_bonus[1].request_url, fixed_bonus[1].sha256)
+                    not in imported
+                ):
+                    record, raw = fixed_bonus
+                    self._insert_fixed_bonus(connection, record, raw)
+                for match_id, dataset, status, raw in previews:
+                    if not replay_imports and (
+                        f"preview:{dataset}", raw.request_url, raw.sha256
+                    ) in imported:
+                        continue
+                    self._insert_preview_source(
+                        connection, match_id, dataset, status, raw
+                    )
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+            else:
+                connection.execute("COMMIT")
+
+    @staticmethod
+    def _insert_preview_source(
+        connection,
+        match_id: int,
+        dataset: str,
+        status: str,
+        raw: StoredResponse,
+    ) -> None:
         if not is_preview_dataset(dataset):
             raise ValueError("invalid_preview_dataset")
         if status not in {"completed", "empty"}:
             raise ValueError("invalid_preview_status")
-        with duckdb.connect(str(self.database_path)) as connection:
-            connection.execute("BEGIN TRANSACTION")
-            try:
-                exists = connection.execute(
-                    "SELECT 1 FROM sporttery_matches WHERE match_id = ?", [match_id]
-                ).fetchone()
-                if exists is None:
-                    raise ValueError("unknown_match")
-                connection.execute(
-                    """
-                    INSERT OR IGNORE INTO sporttery_preview_sources
-                        (match_id, dataset, status, request_url, local_path,
-                         sha256, status_code, fetched_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    [
-                        match_id,
-                        dataset,
-                        status,
-                        raw.request_url,
-                        _portable_raw_path(raw.path),
-                        raw.sha256,
-                        raw.status_code,
-                        raw.fetched_at,
-                    ],
-                )
-                self._insert_request(connection, f"preview:{dataset}", raw)
-            except Exception:
-                connection.execute("ROLLBACK")
-                raise
-            else:
-                connection.execute("COMMIT")
+        exists = connection.execute(
+            "SELECT 1 FROM sporttery_matches WHERE match_id = ?", [match_id]
+        ).fetchone()
+        if exists is None:
+            raise ValueError("unknown_match")
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO sporttery_preview_sources
+                (match_id, dataset, status, request_url, local_path,
+                 sha256, status_code, fetched_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                match_id,
+                dataset,
+                status,
+                raw.request_url,
+                _portable_raw_path(raw.path),
+                raw.sha256,
+                raw.status_code,
+                raw.fetched_at,
+            ],
+        )
+        SportteryRepository._insert_request(connection, f"preview:{dataset}", raw)
 
     def import_fixed_bonus(self, record: FixedBonusRecord, raw: StoredResponse) -> None:
-        with duckdb.connect(str(self.database_path)) as connection:
-            connection.execute("BEGIN TRANSACTION")
-            try:
-                exists = connection.execute(
-                    "SELECT 1 FROM sporttery_matches WHERE match_id = ?", [record.match_id]
-                ).fetchone()
-                if exists is None:
-                    raise ValueError("unknown_match")
-                snapshot_rows: list[list[object]] = []
-                outcome_rows: list[list[object]] = []
-                for snapshot in record.snapshots:
-                    line_key = "none" if snapshot.line is None else format(snapshot.line, "g")
-                    snapshot_id = _stable_id(
-                        "snapshot", str(record.match_id), snapshot.market_type,
-                        line_key, snapshot.captured_at.isoformat(),
-                    )
-                    snapshot_rows.append(
-                        [snapshot_id, record.match_id, snapshot.market_type, snapshot.line,
-                         line_key, snapshot.captured_at, raw.sha256]
-                    )
-                    for outcome_code, odds in snapshot.outcomes:
-                        outcome_id = _stable_id("outcome", snapshot_id, outcome_code)
-                        outcome_rows.append(
-                            [outcome_id, snapshot_id, outcome_code, odds]
-                        )
+        self.import_match_details((record, raw), [])
 
-                if snapshot_rows:
-                    _insert_rows(
-                        connection,
-                        """
-                        INSERT OR IGNORE INTO sporttery_bonus_snapshots
-                            (id, match_id, market_type, handicap, handicap_key,
-                             captured_at, raw_sha256)
-                        VALUES
-                        """,
-                        "(?, ?, ?, ?, ?, ?, ?)",
-                        snapshot_rows,
-                    )
-                if outcome_rows:
-                    _insert_rows(
-                        connection,
-                        """
-                        INSERT OR IGNORE INTO sporttery_bonus_outcomes
-                            (id, snapshot_id, outcome_code, odds_value)
-                        VALUES
-                        """,
-                        "(?, ?, ?, ?)",
-                        outcome_rows,
-                    )
-                if record.single_pools:
-                    _insert_rows(
-                        connection,
-                        """
-                        INSERT OR IGNORE INTO sporttery_single_pools
-                            (match_id, pool_code, is_single, raw_sha256)
-                        VALUES
-                        """,
-                        "(?, ?, ?, ?)",
-                        [
-                            [record.match_id, pool_code, is_single, raw.sha256]
-                            for pool_code, is_single in record.single_pools
-                        ],
-                    )
-                self._sync_core_markets(connection, record)
-                self._insert_request(connection, "fixed_bonus", raw)
-            except Exception:
-                connection.execute("ROLLBACK")
-                raise
-            else:
-                connection.execute("COMMIT")
+    @staticmethod
+    def _insert_fixed_bonus(connection, record: FixedBonusRecord, raw: StoredResponse) -> None:
+        exists = connection.execute(
+            "SELECT 1 FROM sporttery_matches WHERE match_id = ?", [record.match_id]
+        ).fetchone()
+        if exists is None:
+            raise ValueError("unknown_match")
+        snapshot_rows: list[list[object]] = []
+        outcome_rows: list[list[object]] = []
+        for snapshot in record.snapshots:
+            line_key = "none" if snapshot.line is None else format(snapshot.line, "g")
+            snapshot_id = _stable_id(
+                "snapshot", str(record.match_id), snapshot.market_type,
+                line_key, snapshot.captured_at.isoformat(),
+            )
+            snapshot_rows.append(
+                [snapshot_id, record.match_id, snapshot.market_type, snapshot.line,
+                 line_key, snapshot.captured_at, raw.sha256]
+            )
+            for outcome_code, odds in snapshot.outcomes:
+                outcome_id = _stable_id("outcome", snapshot_id, outcome_code)
+                outcome_rows.append([outcome_id, snapshot_id, outcome_code, odds])
+
+        if snapshot_rows:
+            _insert_rows(
+                connection,
+                """
+                INSERT OR IGNORE INTO sporttery_bonus_snapshots
+                    (id, match_id, market_type, handicap, handicap_key,
+                     captured_at, raw_sha256)
+                VALUES
+                """,
+                "(?, ?, ?, ?, ?, ?, ?)",
+                snapshot_rows,
+            )
+        if outcome_rows:
+            _insert_rows(
+                connection,
+                """
+                INSERT OR IGNORE INTO sporttery_bonus_outcomes
+                    (id, snapshot_id, outcome_code, odds_value)
+                VALUES
+                """,
+                "(?, ?, ?, ?)",
+                outcome_rows,
+            )
+        if record.single_pools:
+            _insert_rows(
+                connection,
+                """
+                INSERT OR IGNORE INTO sporttery_single_pools
+                    (match_id, pool_code, is_single, raw_sha256)
+                VALUES
+                """,
+                "(?, ?, ?, ?)",
+                [
+                    [record.match_id, pool_code, is_single, raw.sha256]
+                    for pool_code, is_single in record.single_pools
+                ],
+            )
+        SportteryRepository._sync_core_markets(connection, record)
+        SportteryRepository._insert_request(connection, "fixed_bonus", raw)
 
     def coverage_report(self, year: int) -> CoverageReport:
         with duckdb.connect(str(self.database_path), read_only=True) as connection:

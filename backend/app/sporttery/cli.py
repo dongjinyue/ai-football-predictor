@@ -20,6 +20,7 @@ from app.sporttery.repository import (
 )
 from app.sporttery.service import (
     CollectionReport,
+    RequestStartPacer,
     SportteryCollectionService,
     _date_windows,
     collect_with_blocked_retries,
@@ -70,10 +71,21 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def _add_collection_controls(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--delay-min", type=float, default=3.0)
-    parser.add_argument("--delay-max", type=float, default=5.0)
+    parser.add_argument(
+        "--delay-min", type=float, default=3.0,
+        help="相邻网络请求开始时间的最短间隔（秒）",
+    )
+    parser.add_argument(
+        "--delay-max", type=float, default=5.0,
+        help="相邻网络请求开始时间的最长随机间隔（秒）",
+    )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--replay-imports",
+        action="store_true",
+        help="不跳过数据库已确认的数据，用原始响应重放导入",
+    )
     parser.add_argument(
         "--include-preview",
         action="store_true",
@@ -123,7 +135,12 @@ def _collect_single_range(args, repository: SportteryRepository) -> int:
         include_preview=args.include_preview,
     )
     try:
-        result = service.collect_range(args.start, args.end, resume=args.resume)
+        result = service.collect_range(
+            args.start,
+            args.end,
+            resume=args.resume,
+            replay_imports=args.replay_imports,
+        )
     finally:
         client.client.close()
     print(json.dumps(asdict(result), ensure_ascii=False, indent=2, default=str))
@@ -151,6 +168,7 @@ def _collect_multiple_years(
 
     synchronized_repository = SynchronizedSportteryRepository(repository)
     output_lock = threading.Lock()
+    request_pacer = RequestStartPacer(args.delay_min, args.delay_max)
 
     def progress(year: int, event: dict[str, object]) -> None:
         with output_lock:
@@ -166,6 +184,7 @@ def _collect_multiple_years(
             args.delay_max,
             lambda event: progress(year, event),
             include_preview=args.include_preview,
+            request_pacer=request_pacer,
         )
         try:
             def wait(seconds: float) -> None:
@@ -174,7 +193,10 @@ def _collect_multiple_years(
 
             return collect_with_blocked_retries(
                 lambda resume: service.collect_range(
-                    date(year, 1, 1), end, resume=resume
+                    date(year, 1, 1),
+                    end,
+                    resume=resume,
+                    replay_imports=args.replay_imports,
                 ),
                 initial_resume=args.resume,
                 retries=args.blocked_retries,
@@ -189,7 +211,16 @@ def _collect_multiple_years(
     return _result_exit_code(results)
 
 
-def _build_service(client, repository, delay_min, delay_max, progress, *, include_preview=False):
+def _build_service(
+    client,
+    repository,
+    delay_min,
+    delay_max,
+    progress,
+    *,
+    include_preview=False,
+    request_pacer=None,
+):
     raw_root = PROJECT_ROOT / "data" / "raw" / "sporttery"
     return SportteryCollectionService(
         client=client,
@@ -200,6 +231,7 @@ def _build_service(client, repository, delay_min, delay_max, progress, *, includ
         delay_max=delay_max,
         progress=progress,
         include_preview=include_preview,
+        request_pacer=request_pacer,
     )
 
 

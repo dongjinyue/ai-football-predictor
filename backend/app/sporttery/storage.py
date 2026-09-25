@@ -82,7 +82,16 @@ class RawResponseStore:
             "data": payload.data,
         }
         _atomic_json_write(path, document)
-        return self._load(path, from_cache=False)
+        # 写入内容和摘要刚刚由当前进程生成，无需立即重新读盘并计算第二遍摘要。
+        return StoredResponse(
+            path=path,
+            sha256=digest,
+            fetched_at=payload.fetched_at,
+            request_url=payload.request_url,
+            status_code=payload.status_code,
+            data=payload.data,
+            from_cache=False,
+        )
 
     def load(self, kind: str, year: int, key: str) -> StoredResponse | None:
         path = self._path(kind, year, key)
